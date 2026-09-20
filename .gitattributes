@@ -1,0 +1,25 @@
+# 自动检测文本文件并统一换行符
+* text=auto
+
+# 脚本文件使用 LF
+*.sh text eol=lf
+*.bash text eol=lf
+
+# Windows 批处理使用 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制文件
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.mp3 binary
+*.mp4 binary
+*.zip binary
+*.tar.gz binary
+
+# Git LFS（如需要取消注释）
+# *.ps1 filter=lfs diff=lfs merge=lfs -text
