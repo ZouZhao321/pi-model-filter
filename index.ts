@@ -34,6 +34,7 @@ const REQUEST_TIMEOUT_MS = 10_000;
 // 两次尝试之间不等待。
 const MAX_ATTEMPTS = 3;
 const RETRYABLE_STATUS_CODES = new Set([408, 425, 429, 500, 502, 503, 504]);
+const ABORT_MESSAGE = '请求已中止（超时或调用方取消）';
 
 export interface AvailableModelsResult {
   ids: string[];
@@ -73,6 +74,7 @@ async function cancelBody(response: Response): Promise<void> {
 
 // 带重试的请求：可重试的状态码，以及任何未被调用方取消的错误，都会再试一次
 // （与 pi 的 fetchWithRetry 一致）；重试之前丢弃上一次的响应体。
+// 所有失败路径都抛 SourceError，日志才能稳定拿到 attempts 与 status。
 export async function fetchWithRetry(
   doFetch: (signal: AbortSignal) => Promise<Response>,
   signal: AbortSignal,
@@ -81,7 +83,7 @@ export async function fetchWithRetry(
   let attempts = 0;
   for (;;) {
     attempts += 1;
-    signal.throwIfAborted();
+    if (signal.aborted) throw new SourceError(ABORT_MESSAGE, attempts);
     try {
       const response = await doFetch(signal);
       if (!RETRYABLE_STATUS_CODES.has(response.status) || attempts >= maxAttempts) {
@@ -89,7 +91,7 @@ export async function fetchWithRetry(
       }
       await cancelBody(response);
     } catch (error) {
-      if (signal.aborted) throw error;
+      if (signal.aborted) throw new SourceError(ABORT_MESSAGE, attempts);
       if (attempts >= maxAttempts) {
         throw new SourceError(error instanceof Error ? error.message : String(error), attempts);
       }
@@ -137,7 +139,7 @@ export function createOpencodeGoSource(ctx: ExtensionContext): AvailableModelsSo
         payload = await response.json();
       } catch (error) {
         if (signal.aborted) {
-          throw new SourceError('请求已中止（超时或调用方取消）', attempts, response.status);
+          throw new SourceError(ABORT_MESSAGE, attempts, response.status);
         }
         throw new SourceError(
           `响应不是合法 JSON：${error instanceof Error ? error.message : String(error)}`,

@@ -1,6 +1,8 @@
-// parseModelIds()、toModelIds()、selectModels() 与 fetchWithRetry() 的单元测试。
-import { describe, expect, it } from 'vitest';
+// parseModelIds()、toModelIds()、selectModels()、fetchWithRetry() 与默认来源的单元测试。
+import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { describe, expect, it, vi } from 'vitest';
 import {
+  createOpencodeGoSource,
   fetchWithRetry,
   parseModelIds,
   selectModels,
@@ -136,5 +138,73 @@ describe('fetchWithRetry', () => {
         throw new Error('boom');
       }, signal),
     ).rejects.toMatchObject({ attempts: 3, message: 'boom' });
+  });
+
+  it('调用方已经取消时直接抛 SourceError，不再发请求', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    let calls = 0;
+    let thrown: unknown;
+    try {
+      await fetchWithRetry(async () => {
+        calls += 1;
+        return new Response(null, { status: 200 });
+      }, controller.signal);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(SourceError);
+    expect(thrown).toMatchObject({ attempts: 1 });
+    expect(calls).toBe(0);
+  });
+
+  it('自定义尝试上限时按上限停止', async () => {
+    const { attempts } = await fetchWithRetry(
+      async () => new Response(null, { status: 500 }),
+      signal,
+      2,
+    );
+    expect(attempts).toBe(2);
+  });
+
+  it('重试之前丢弃上一次的响应体', async () => {
+    let calls = 0;
+    let firstResponse: Response | undefined;
+    await fetchWithRetry(async () => {
+      calls += 1;
+      const response =
+        calls === 1 ? new Response('busy', { status: 503 }) : new Response(null, { status: 200 });
+      if (calls === 1) firstResponse = response;
+      return response;
+    }, signal);
+    expect(firstResponse?.bodyUsed).toBe(true);
+  });
+});
+
+describe('createOpencodeGoSource', () => {
+  function fakeContext(): ExtensionContext {
+    return {
+      modelRegistry: {
+        getProvider: () => ({
+          baseUrl: 'https://example.com/v1',
+          getModels: () => [{ id: 'a', api: 'openai-completions', baseUrl: 'https://example.com/v1' }],
+        }),
+        getApiKeyForProvider: async () => 'test-key',
+      },
+    } as unknown as ExtensionContext;
+  }
+
+  it('响应体读取阶段被中止时抛 SourceError', async () => {
+    const controller = new AbortController();
+    vi.stubGlobal('fetch', async () => {
+      controller.abort();
+      return new Response('not json', { status: 200 });
+    });
+    try {
+      const source = createOpencodeGoSource(fakeContext());
+      await expect(source.fetchIds(controller.signal)).rejects.toThrow(SourceError);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
