@@ -1,6 +1,12 @@
-// parseModelIds()、selectModels() 与 fetchWithRetry() 的单元测试。
+// parseModelIds()、toModelIds()、selectModels() 与 fetchWithRetry() 的单元测试。
 import { describe, expect, it } from 'vitest';
-import { fetchWithRetry, parseModelIds, selectModels, SourceError } from './index.ts';
+import {
+  fetchWithRetry,
+  parseModelIds,
+  selectModels,
+  SourceError,
+  toModelIds,
+} from './index.ts';
 
 describe('parseModelIds', () => {
   it('取 data 数组里的 id', () => {
@@ -18,6 +24,23 @@ describe('parseModelIds', () => {
   it('结构里没有 data 数组时抛出', () => {
     expect(() => parseModelIds({ models: [] })).toThrow();
     expect(() => parseModelIds(null)).toThrow();
+  });
+});
+
+describe('toModelIds', () => {
+  it('结构正常时返回去重后的 id', () => {
+    expect(toModelIds({ data: [{ id: 'a' }, { id: 'a' }] }, 1, 200)).toEqual(['a']);
+  });
+
+  it('结构不对时抛出带尝试次数与状态码的 SourceError', () => {
+    let thrown: unknown;
+    try {
+      toModelIds({ models: [] }, 2, 200);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(SourceError);
+    expect(thrown).toMatchObject({ attempts: 2, status: 200 });
   });
 });
 
