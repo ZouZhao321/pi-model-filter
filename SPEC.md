@@ -2,11 +2,13 @@
 
 本文件是 issue #1（`feat: 通过 OPENCODE_API_KEY 自动获取 opencode 模型列表，再按排除清单剔除`）的实现规格。
 
+## Background
+
+`opencode-go` 是 pi 内置的 provider，模型目录由 pi 自己维护（内置数据加 pi.dev 远端目录）。内置 provider 改不动：`models.json` 对模型是 upsert 语义（`dist/core/provider-composer.js` 的 `applyModelsJson` 先整份复制内置模型，再按 id 覆盖或追加），能加能改，没有删除入口。要真正缩减这份列表，只能靠扩展的 `registerProvider`，它在提供 `models` 时是整份替换语义（同文件 `applyExtension`）。这个插件就是在这个前提下存在的：内置 provider 无法修改，只能由插件接管整份列表并过滤。
+
 ## Problem Statement
 
-前提：`opencode-go` 是 pi 内置的 provider，它的模型目录由 pi 自己维护（内置数据加 pi.dev 远端目录）。内置 provider 改不动：`models.json` 对模型是 upsert 语义（`dist/core/provider-composer.js` 的 `applyModelsJson` 先整份复制内置模型，再按 id 覆盖或追加），只能新增和覆盖，没有删除入口。要真正缩减这份列表，只能靠扩展的 `registerProvider`——它在提供 `models` 时是整份替换语义（同文件 `applyExtension`）。这个插件就是在这个前提下存在的：内置 provider 无法修改，只能由插件接管整份列表并过滤。
-
-在这个前提下，`/model` 里 opencode-go 显示的模型来自 pi 自己的目录，与这张 key 实际能调用的模型并不一致。实测（2026-09-22）：pi 那份列表有 31 个模型，opencode 接口返回 33 个。
+`/model` 里 opencode-go 显示的模型来自 pi 自己的目录，与这张 key 实际能调用的模型并不一致。实测（2026-09-22）：pi 那份列表有 31 个模型，opencode 接口返回 33 个。
 
 麻烦出在 pi 没有收录的那部分模型上：
 
