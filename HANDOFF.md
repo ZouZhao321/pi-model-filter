@@ -1,25 +1,34 @@
 # 交接：model-filter 扩展（pi-model-filter）
 
-生成时间：2026-09-22。给下一个 agent 承接本插件的工作。
+生成时间：2026-09-23。给下一个 agent 承接本插件的工作。
 
 远端仓库：https://github.com/ZouZhao321/pi-model-filter
 
 ## 这个插件做什么
 
-在 `session_start` 时读 `~/.pi/agent/model-exclude.json`，按 provider 分组，把清单里列出的模型从该 provider 的模型列表中剔除，再用 `pi.registerProvider` 注册剩下的列表。
+每次会话启动时做三层过滤，把结果注册给 `opencode-go`：
 
-- 配置格式：`{ "provider 名": ["模型 id", "支持 * 通配符"] }`，例如 `{"opencode-go": ["glm-5.3", "muse-spark-*"]}`。
-- 配置缺失、JSON 不合法、值不是字符串数组，一律直接抛出错误，不做兜底。
-- 配置路径常量 `CONFIG_PATH` 写死在 `index.ts` 里，指向 `~/.pi/agent/model-exclude.json`。
-- 插件本身不含任何模型 id，唯一出现模型 id 的位置是 `index.ts` 里配置格式的注释示例。
+1. 向 opencode 接口 `GET {baseUrl}/models` 要一份当前凭据可用的模型 id。这份数据只有 id，没有任何参数。
+2. 到 pi 那份列表里取元数据，取不到的 id 丢弃。
+3. 套排除清单，删掉清单里列出的模型。
+
+请求是异步的，不挡住会话启动：启动时先用上次保存的名单注册一份，请求成功后写入新名单并重新注册，失败则沿用已注册的那份并写一条日志。
+
+配置与数据都在 `~/.pi/agent/model-filter/`：
+
+- `model-exclude.json` —— 排除清单，格式 `{ "provider 名": ["模型 id", "支持 * 通配符"] }`。
+- `available-models.json` —— 上一次接口返回的 id 名单，结构 `{ provider, updatedAt, ids }`。
+- `requests.log` —— 请求日志，每行一条 JSON，字段 `at`、`provider`、`url`、`outcome`、`durationMs`、`status`、`idCount`、`error`。
+
+配置或名单文件不合法时就地抛出错误。
 
 ## 为什么必须用扩展实现
 
-`models.json` 对模型是 upsert 语义（`dist/core/provider-composer.js` 的 `applyModelsJson`：先整份复制内置模型，再按 id 覆盖或追加），没有删除入口。扩展的 `registerProvider` 在提供 `models` 时是替换语义，这是唯一能真正减少模型列表的方式。
+`models.json` 对模型是 upsert 语义（`dist/core/provider-composer.js` 的 `applyModelsJson`：先整份复制内置模型，再按 id 覆盖或追加），没有删除入口。扩展的 `registerProvider` 在提供 `models` 时是替换语义（同文件 `applyExtension`：`config.models` 存在时直接 map 返回，不保留原有条目），这是唯一能真正减少模型列表的方式。
 
-时机必须挂在 `session_start`：factory 阶段拿到的内置目录不完整（实测只有 19 个 opencode-go 模型），另有一批是运行期从远端目录刷新进来的，到 `session_start` 才齐。
+时机必须挂在 `session_start`：factory 阶段拿到的内置目录不完整，另有一批模型是运行期从远端目录刷新的，到 `session_start` 才齐。会话启动之后调用 `registerProvider` 是立即生效的（pi 文档写明不需要 `/reload`），所以异步请求返回之后可以再注册一次。
 
-## 当前清单状态（2026-09-22）
+## 当前清单状态（2026-09-23）
 
 `opencode-go` 排除 16 条：
 
@@ -29,85 +38,46 @@ glm-5.3, gpt-5.6-luna, grok-4.5, grok-4.6, grok-4.7, hy4-preview, kimi-k3,
 mimo-v2.5-pro, mimo-v2.6-pro, qwen3.7-max, qwen3.8-flash, qwen3.8-max
 ```
 
-其中 15 条来自月度限额表（限额低于 $60），`grok-4.5` 是表外模型（pi 内置目录里还残留，远端目录已下线），用户决定一并禁止。
+其中 15 条来自月度限额表（限额低于 $60），`grok-4.5` 是 pi 内置数据里残留、远端目录已经下线的模型。
 
-保留 15 条（限额均为 $60）：`glm-5.1`、`glm-5.2`、`glm-5.3-flash`、`hy3`、`kimi-k2.6`、`kimi-k2.7-code`、`longcat-2.0`、`mimo-v2.5`、`mimo-v2.6-flash`、`minimax-m2.7`、`minimax-m3`、`muse-spark-1.2-contributor`、`muse-spark-1.3-contributor`、`qwen3.6-plus`、`qwen3.7-plus`。
+会话里最终显示 15 个：`glm-5.1`、`glm-5.2`、`glm-5.3-flash`、`hy3`、`kimi-k2.6`、`kimi-k2.7-code`、`longcat-2.0`、`mimo-v2.5`、`mimo-v2.6-flash`、`minimax-m2.7`、`minimax-m3`、`muse-spark-1.2-contributor`、`muse-spark-1.3-contributor`、`qwen3.6-plus`、`qwen3.7-plus`。
 
 限额表来源：`https://opencode.ai/docs/go/` 的 Usage limits 表。限额机制是 5 小时窗口 = 月限的 20%，每周 = 50%，每月 = 100%。
 
-## 已建的远端与 issue
+## issue #1 与实现规格
 
-- GitHub 私有仓库 `ZouZhao321/pi-model-filter`，本地仓库的 `origin` 已指向它。
-- **issue #1**：https://github.com/ZouZhao321/pi-model-filter/issues/1 —— 需求是让插件改用 `OPENCODE_API_KEY` 自动获取 opencode 的模型列表，再按排除清单剔除。issue 正文列了五个待决问题，评论里补了三个模型的实测结论。
+- issue #1：https://github.com/ZouZhao321/pi-model-filter/issues/1
+- 实现规格：仓库根目录的 `SPEC.md`。
 
-## 待决问题（issue #1 正文里也有）
+issue 里五个待决问题的结论：pi 那边查不到参数的模型一律丢弃、不补参数；请求失败沿用上次保存的名单并记日志；每次 `session_start` 都发请求、异步进行、结果保存到插件目录；只处理 `opencode-go`；与 pi.dev 目录的关系是取交集，元数据以 pi.dev 为准。
 
-1. **元数据缺口**：`GET https://opencode.ai/zen/go/v1/models` 只返回 `id`/`object`/`created`/`owned_by`，没有任何元数据。pi 调用模型需要 `api`、`baseUrl`、`contextWindow`、`maxTokens`、`cost`、`input`、`reasoning`、`compat`。pi 数据源里查不到元数据的新模型（例如 `omen-alpha`），是跳过不注册，还是用默认值注册。
-2. **接口调用失败时的行为**：网络不可用、key 无效、非 2xx 时，保持 pi 原有列表还是就地抛出。本仓库风格是就地抛出。
-3. **刷新频率与缓存**：每次 `session_start` 都请求，还是加缓存与有效期限。`session_start` 是同步回调，网络请求要改成异步并考虑对启动速度的影响。
-4. **provider 范围**：只处理 `opencode-go`，还是按 `model-exclude.json` 里的 provider 键逐个处理（`opencode` provider 用同一个 `OPENCODE_API_KEY`，接口路径不同）。
-5. **与 pi.dev 目录的关系**：opencode 接口返回账户可用模型，pi.dev 目录返回 pi 上游收录的模型。最终列表取两者共有的部分还是合并。
+## 关键实测事实（2026-09-23）
 
-## 关键实测事实（2026-09-22）
-
-### 数据源机制
-
-pi 里 `opencode-go` 的模型列表 = **pi-ai 内置快照**（`@earendil-works/pi-ai/dist/providers/data/opencode-go.json`，生成时间 2026-08-14）**+ pi.dev 远端目录**（`GET https://pi.dev/api/models/providers/opencode-go`），按 id 合并：同 id 用远端条目覆盖，内置没有的 id 追加。
-
-- pi.dev 目录是公开端点，**不带任何凭据**，用 `if-none-match` 做协商。
-- 刷新间隔 `REMOTE_CATALOG_REFRESH_INTERVAL_MS = 4 小时`，启动时触发，缓存写在 `~/.pi/agent/models-store.json`（结构 `{provider: {models, checkedAt, lastModified, etag}}`）。
-- `PI_OFFLINE` 存在时只用缓存不联网。
-
-### 三个模型的实际状态
-
-opencode 接口返回 33 个 id，pi.dev 目录返回 30 个，差额是 `deepseek-flash`、`omen-alpha`、`minimax-m2.5`。这三个在 pi 里原本完全不可见。
-
-按 `model-probe` skill 规范实测，三个全部可用（均返回 `PROBE_OK`）：
-
-| 模型             | 状态 | 耗时 | token | 协议               |
-| ---------------- | ---- | ---- | ----- | ------------------ |
-| `deepseek-flash` | OK   | 4.2s | 3966  | openai-completions |
-| `minimax-m2.5`   | OK   | 4.0s | 3703  | openai-completions |
-| `omen-alpha`     | OK   | 4.6s | 4085  | openai-completions |
-
-报告：`~/.pi/agent/skills/model-probe-workspace/model-probe-opencode-go-20260922-222616.md`
-
-为了让 pi 认识这三个 id，已在 `~/.pi/agent/models.json` 的 `opencode-go` 下加了 `models` 数组（提交 `8d7b2a16`）：
-
-- `deepseek-flash` 元数据照抄 `deepseek-v4.1-flash`（1M 上下文、384K 输出、thinkingFormat deepseek）。
-- `minimax-m2.5` 元数据照抄 `minimax-m2.7`（204800 上下文、131072 输出），价格用 Go 页面的 M2.5 档（0.30/1.20/0.06/0.375）。
-- `omen-alpha` 的 `contextWindow`(200000)、`maxTokens`(32000)、`cost`(全 0) **是估算值**，公开资料查不到真实值，拿到准确值要改。
-
-### 坑
-
-- **opencode Go 强制要求 `x-opencode-session` 请求头**。缺这个头时返回 HTTP 400 `MissingSessionID`，与模型无关。pi 自己会发这个头（`x-opencode-session` 加 `x-opencode-client: pi`），自行拼请求验证时要补上。
-- `deepseek-flash` 是 DeepSeek 官方的规范模型名，与 `deepseek-v4.1-flash` 指向同一个模型（DeepSeek-V4.1-Flash）；`deepseek-v4-flash`、`deepseek-v4-flash-vision-exp` 是已退役旧名，请求仍被接受但由 V4.1-Flash 承接。自动获取列表时要做同义 id 归一化，否则会出现两条指向同一模型的条目。
-- `minimax-m2.5` 的 `/chat/completions` 与 `/messages` 都能返回 200。
-- `pi --list-models` 不走会话流程，不受过滤影响，看到的是未过滤的完整列表。判断过滤结果要看 `session_start` 之后的状态。
-- `omen-alpha` 是 opencode 的隐身模型，厂商归在 `unknown` 分类下（`https://opencode.ai/data/unknown/omen-alpha`），Context/Output/Release 全部 Unknown，但使用量排名靠前。这类模型不会出现在 Go 宣传页面。
+- 接口 `GET https://opencode.ai/zen/go/v1/models` 返回 33 个 id，字段只有 `id`、`object`、`created`、`owned_by`。
+- pi 那份列表有 31 个：pi.dev 远端目录缓存 30 个，加上只在 pi 内置数据里存在的 `grok-4.5`。
+- 排除清单 16 条里 15 条命中接口返回的 id，会话里最终显示 15 个。
+- 接口返回但 pi 列表里没有的 id 会被丢弃。`deepseek-flash`、`minimax-m2.5`、`omen-alpha` 三个就属于这一类，pi.dev 收录之前不会出现在列表里。
+- **`x-opencode-session` 请求头是必须的**。缺它时接口返回 HTTP 400 `MissingSessionID`，与调用的模型无关。pi 自己会带上这个头（`x-opencode-session` 加 `x-opencode-client: pi`）。
+- **同一个 provider 下模型的 `baseUrl` 会随接口类型不同**：opencode-go 的 `anthropic-messages` 模型用 `https://opencode.ai/zen/go`，`openai-completions` 模型用 `https://opencode.ai/zen/go/v1`。模型列表接口属于 OpenAI 兼容端点，插件取 `openai-completions` 模型的地址再拼 `/models`。改用第一个模型的地址会拼出 `/zen/go/models`，接口返回 404。
+- provider 级别没有 `baseUrl`，`provider.baseUrl` 是 undefined，地址挂在模型条目上。
+- `pi --list-models` 不走会话流程，不受过滤影响，看到的是未过滤的完整列表。
 
 ## 验证方式
 
-过滤生效的端到端验证：跑一次真实会话，在 `session_start` 时把 provider 的模型 id 列表写到文件。探针扩展与校验脚本在 `~/.pi/tmp/`（已被 gitignore）：
+探针扩展在 `~/.pi/tmp/probe-filter.ts`（`~/.pi/tmp/` 已被 gitignore），每 500 毫秒采样一次 opencode-go 的模型 id，写入 `~/.pi/tmp/probe-filter.json`。
 
 ```bash
 cd ~/.pi
-rm -f tmp/probe-models-after.json
+rm -f tmp/probe-filter.json
 pi -ne -nc -ns -np -nt -p "只回答 ok" --no-session \
    -e "C:/Users/ZouZhao/.pi/agent/extensions/model-filter" \
-   -e "C:/Users/ZouZhao/.pi/tmp/probe-models.ts"
-node tmp/verify-model-exclude.mjs
+   -e "C:/Users/ZouZhao/.pi/tmp/probe-filter.ts"
+cat agent/model-filter/requests.log
 ```
 
-`verify-model-exclude.mjs` 会把配置与月度限额表逐条对比，并断言真实会话里存活下来的模型正好是限额 $60 的那批。
+已经实测通过的路径：首次运行（启动瞬间是 pi 的完整列表，请求返回后变成 15 个）、第二次启动（启动瞬间就是 15 个）、离线启动（不发请求、不写日志，列表仍是 15 个）、请求失败（列表保持 15 个，日志记一条 `failure`）。
 
-探测单个模型：
-
-```bash
-python ~/.pi/agent/skills/model-probe/scripts/probe.py --provider opencode-go \
-  --model deepseek-flash --model minimax-m2.5 --model omen-alpha \
-  --report-dir ~/.pi/agent/skills/model-probe-workspace
-```
+失败注入的办法：临时给 `~/.pi/agent/models.json` 的 `opencode-go` 加一个指向无效地址的 `baseUrl`，跑完删掉。
 
 ## 开发约定
 
@@ -123,10 +93,12 @@ npm run test        # vitest
 
 ## 文件地图
 
-- `index.ts` —— 插件入口，`loadExcludes()` 读配置，`matches()` 是通配符匹配的纯函数，`session_start` 回调做过滤与注册。
-- `index.test.ts` —— `matches()` 的单元测试（精确匹配、`*` 通配符、正则元字符按字面处理）。
-- `~/.pi/agent/model-exclude.json` —— 排除清单（被 `~/.pi` 仓库跟踪）。
-- `~/.pi/agent/models.json` —— provider 配置，`opencode-go` 下有 `models`（三个补充模型）与 `modelOverrides`。
+- `index.ts` —— 插件入口。`matches()` 通配符匹配、`parseModelIds()` 响应解析、`selectModels()` 三层过滤都是纯函数；`loadExcludes()` 读清单，`loadAvailableIds()` 与 `saveAvailableIds()` 读写名单，`appendLog()` 写日志，`refresh()` 发请求，`applyFilter()` 计算并注册。
+- `index.test.ts` —— 上述纯函数的单元测试，15 个用例。
+- `SPEC.md` —— 实现规格。
+- `~/.pi/agent/model-filter/model-exclude.json` —— 排除清单（被 `~/.pi` 仓库跟踪）。
+- `~/.pi/agent/model-filter/available-models.json` —— 上一次接口返回的 id 名单（运行时数据，已被忽略）。
+- `~/.pi/agent/model-filter/requests.log` —— 请求日志（运行时数据，已被忽略）。
+- `~/.pi/agent/models.json` —— provider 配置，`opencode-go` 下现在只有 `modelOverrides`（四个模型补图片输入）。
 - `~/.pi/agent/models-store.json` —— pi 的模型目录缓存。
-- `~/.pi/agent/skills/model-probe/` —— 探测 skill（`scripts/probe.py`）。
-- `~/.pi/agent/skills/model-probe-workspace/` —— 探测报告与历史分析。
+- `~/.pi/tmp/probe-filter.ts` —— 端到端验证用的探针扩展。
