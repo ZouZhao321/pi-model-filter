@@ -29,22 +29,65 @@ const AVAILABLE_PATH = join(DATA_DIR, 'available-models.json');
 const LOG_PATH = join(DATA_DIR, 'requests.log');
 const REQUEST_TIMEOUT_MS = 10_000;
 
+// 重试策略照抄 pi 自己的 fetchWithRetry（dist/utils/management-http.js）：
+// 同一个超时预算内最多尝试 3 次，只对下面这些状态码与传输错误重试，
+// 两次尝试之间不等待。
+const MAX_ATTEMPTS = 3;
+const RETRYABLE_STATUS_CODES = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+export interface AvailableModelsResult {
+  ids: string[];
+  /** 实际发出的请求次数 */
+  attempts: number;
+}
+
 /** 名单来源：外部环境只出现在这个接口的实现里，换数据源时整体替换。 */
 export interface AvailableModelsSource {
   /** 请求地址，只用于写日志 */
   readonly url: string;
-  fetchIds(signal: AbortSignal): Promise<string[]>;
+  fetchIds(signal: AbortSignal): Promise<AvailableModelsResult>;
 }
 
 export type SourceFactory = (ctx: ExtensionContext) => AvailableModelsSource;
 
-/** 带 HTTP 状态码的错误，方便日志记下状态码。 */
-export class HttpError extends Error {
-  readonly status: number;
+/** 名单请求失败。status 只在接口返回了 HTTP 状态码时存在。 */
+export class SourceError extends Error {
+  readonly attempts: number;
+  readonly status: number | undefined;
 
-  constructor(status: number) {
-    super(`接口返回 HTTP ${status}`);
+  constructor(message: string, attempts: number, status?: number) {
+    super(message);
+    this.attempts = attempts;
     this.status = status;
+  }
+}
+
+// 带重试的请求。调用方取消是终态的；可重试的状态码会把响应体丢弃之后再试一次。
+export async function fetchWithRetry(
+  doFetch: (signal: AbortSignal) => Promise<Response>,
+  signal: AbortSignal,
+  maxAttempts: number = MAX_ATTEMPTS,
+): Promise<{ response: Response; attempts: number }> {
+  let attempts = 0;
+  for (;;) {
+    attempts += 1;
+    signal.throwIfAborted();
+    try {
+      const response = await doFetch(signal);
+      if (!RETRYABLE_STATUS_CODES.has(response.status) || attempts >= maxAttempts) {
+        return { response, attempts };
+      }
+      try {
+        await response.body?.cancel();
+      } catch {
+        // 响应体本来就要丢弃，取消失败时无事可做，与 pi 的实现一致。
+      }
+    } catch (error) {
+      if (signal.aborted) throw error;
+      if (attempts >= maxAttempts) {
+        throw new SourceError(error instanceof Error ? error.message : String(error), attempts);
+      }
+    }
   }
 }
 
@@ -65,18 +108,34 @@ export function createOpencodeGoSource(ctx: ExtensionContext): AvailableModelsSo
     url,
     async fetchIds(signal) {
       const key = await ctx.modelRegistry.getApiKeyForProvider(PROVIDER_ID);
-      if (!key) throw new Error('没有可用的凭据');
-      const response = await fetch(url, {
-        headers: {
-          accept: 'application/json',
-          authorization: `Bearer ${key}`,
-          'x-opencode-session': randomUUID(),
-          'x-opencode-client': 'pi',
-        },
+      if (!key) throw new SourceError('没有可用的凭据', 0);
+      const { response, attempts } = await fetchWithRetry(
+        (requestSignal) =>
+          fetch(url, {
+            headers: {
+              accept: 'application/json',
+              authorization: `Bearer ${key}`,
+              'x-opencode-session': randomUUID(),
+              'x-opencode-client': 'pi',
+            },
+            signal: requestSignal,
+          }),
         signal,
-      });
-      if (!response.ok) throw new HttpError(response.status);
-      return parseModelIds(await response.json());
+      );
+      if (!response.ok) {
+        throw new SourceError(`接口返回 HTTP ${response.status}`, attempts, response.status);
+      }
+      let payload: unknown;
+      try {
+        payload = await response.json();
+      } catch (error) {
+        throw new SourceError(
+          `响应不是合法 JSON：${error instanceof Error ? error.message : String(error)}`,
+          attempts,
+          response.status,
+        );
+      }
+      return { ids: parseModelIds(payload), attempts };
     },
   };
 }
@@ -176,6 +235,7 @@ interface RequestLogEntry {
   url: string;
   outcome: 'success' | 'failure';
   durationMs: number;
+  attempts?: number;
   status?: number;
   idCount?: number;
   error?: string;
@@ -258,7 +318,7 @@ export async function refresh(
   try {
     const source = sourceFactory(ctx);
     url = source.url;
-    const ids = await source.fetchIds(AbortSignal.timeout(REQUEST_TIMEOUT_MS));
+    const { ids, attempts } = await source.fetchIds(AbortSignal.timeout(REQUEST_TIMEOUT_MS));
     saveAvailableIds(ids);
     applyFilter(pi, ctx, ids, excludedIds);
     appendLog({
@@ -267,6 +327,7 @@ export async function refresh(
       url,
       outcome: 'success',
       durationMs: Date.now() - startedAt,
+      attempts,
       idCount: ids.length,
     });
   } catch (error) {
@@ -276,7 +337,8 @@ export async function refresh(
       url,
       outcome: 'failure',
       durationMs: Date.now() - startedAt,
-      status: error instanceof HttpError ? error.status : undefined,
+      attempts: error instanceof SourceError ? error.attempts : undefined,
+      status: error instanceof SourceError ? error.status : undefined,
       error: error instanceof Error ? error.message : String(error),
     });
   }
