@@ -1,6 +1,14 @@
-// parseModelIds()、selectModels() 与 fetchWithRetry() 的单元测试。
-import { describe, expect, it } from 'vitest';
-import { fetchWithRetry, parseModelIds, selectModels, SourceError } from './index.ts';
+// parseModelIds()、toModelIds()、selectModels()、fetchWithRetry() 与默认来源的单元测试。
+import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { describe, expect, it, vi } from 'vitest';
+import {
+  createOpencodeGoSource,
+  fetchWithRetry,
+  parseModelIds,
+  selectModels,
+  SourceError,
+  toModelIds,
+} from './index.ts';
 
 describe('parseModelIds', () => {
   it('取 data 数组里的 id', () => {
@@ -18,6 +26,23 @@ describe('parseModelIds', () => {
   it('结构里没有 data 数组时抛出', () => {
     expect(() => parseModelIds({ models: [] })).toThrow();
     expect(() => parseModelIds(null)).toThrow();
+  });
+});
+
+describe('toModelIds', () => {
+  it('结构正常时返回去重后的 id', () => {
+    expect(toModelIds({ data: [{ id: 'a' }, { id: 'a' }] }, 1, 200)).toEqual(['a']);
+  });
+
+  it('结构不对时抛出带尝试次数与状态码的 SourceError', () => {
+    let thrown: unknown;
+    try {
+      toModelIds({ models: [] }, 2, 200);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(SourceError);
+    expect(thrown).toMatchObject({ attempts: 2, status: 200 });
   });
 });
 
@@ -113,5 +138,73 @@ describe('fetchWithRetry', () => {
         throw new Error('boom');
       }, signal),
     ).rejects.toMatchObject({ attempts: 3, message: 'boom' });
+  });
+
+  it('调用方已经取消时直接抛 SourceError，不再发请求', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    let calls = 0;
+    let thrown: unknown;
+    try {
+      await fetchWithRetry(async () => {
+        calls += 1;
+        return new Response(null, { status: 200 });
+      }, controller.signal);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(SourceError);
+    expect(thrown).toMatchObject({ attempts: 1 });
+    expect(calls).toBe(0);
+  });
+
+  it('自定义尝试上限时按上限停止', async () => {
+    const { attempts } = await fetchWithRetry(
+      async () => new Response(null, { status: 500 }),
+      signal,
+      2,
+    );
+    expect(attempts).toBe(2);
+  });
+
+  it('重试之前丢弃上一次的响应体', async () => {
+    let calls = 0;
+    let firstResponse: Response | undefined;
+    await fetchWithRetry(async () => {
+      calls += 1;
+      const response =
+        calls === 1 ? new Response('busy', { status: 503 }) : new Response(null, { status: 200 });
+      if (calls === 1) firstResponse = response;
+      return response;
+    }, signal);
+    expect(firstResponse?.bodyUsed).toBe(true);
+  });
+});
+
+describe('createOpencodeGoSource', () => {
+  function fakeContext(): ExtensionContext {
+    return {
+      modelRegistry: {
+        getProvider: () => ({
+          baseUrl: 'https://example.com/v1',
+          getModels: () => [{ id: 'a', api: 'openai-completions', baseUrl: 'https://example.com/v1' }],
+        }),
+        getApiKeyForProvider: async () => 'test-key',
+      },
+    } as unknown as ExtensionContext;
+  }
+
+  it('响应体读取阶段被中止时抛 SourceError', async () => {
+    const controller = new AbortController();
+    vi.stubGlobal('fetch', async () => {
+      controller.abort();
+      return new Response('not json', { status: 200 });
+    });
+    try {
+      const source = createOpencodeGoSource(fakeContext());
+      await expect(source.fetchIds(controller.signal)).rejects.toThrow(SourceError);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
