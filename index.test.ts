@@ -1,6 +1,6 @@
-// parseModelIds() 与 selectModels() 的单元测试。
+// parseModelIds()、selectModels() 与 fetchWithRetry() 的单元测试。
 import { describe, expect, it } from 'vitest';
-import { parseModelIds, selectModels } from './index.ts';
+import { fetchWithRetry, parseModelIds, selectModels, SourceError } from './index.ts';
 
 describe('parseModelIds', () => {
   it('取 data 数组里的 id', () => {
@@ -56,5 +56,62 @@ describe('selectModels', () => {
 
   it('保留 pi 列表里的顺序', () => {
     expect(selectModels(['c', 'a'], piModels, []).map((model) => model.id)).toEqual(['a', 'c']);
+  });
+});
+
+describe('fetchWithRetry', () => {
+  const signal = new AbortController().signal;
+
+  it('遇到可重试的状态码会再试，成功后返回该响应', async () => {
+    let calls = 0;
+    const { response, attempts } = await fetchWithRetry(async () => {
+      calls += 1;
+      return new Response(null, { status: calls < 3 ? 503 : 200 });
+    }, signal);
+    expect(attempts).toBe(3);
+    expect(response.status).toBe(200);
+  });
+
+  it('尝试次数用完之后返回最后一次响应', async () => {
+    const { response, attempts } = await fetchWithRetry(
+      async () => new Response(null, { status: 500 }),
+      signal,
+    );
+    expect(attempts).toBe(3);
+    expect(response.status).toBe(500);
+  });
+
+  it('不可重试的状态码只请求一次', async () => {
+    let calls = 0;
+    const { attempts } = await fetchWithRetry(async () => {
+      calls += 1;
+      return new Response(null, { status: 404 });
+    }, signal);
+    expect(attempts).toBe(1);
+    expect(calls).toBe(1);
+  });
+
+  it('传输错误也会重试', async () => {
+    let calls = 0;
+    const { response, attempts } = await fetchWithRetry(async () => {
+      calls += 1;
+      if (calls < 2) throw new Error('socket hang up');
+      return new Response(null, { status: 200 });
+    }, signal);
+    expect(attempts).toBe(2);
+    expect(response.status).toBe(200);
+  });
+
+  it('传输错误一直失败时抛出 SourceError 并带上尝试次数', async () => {
+    await expect(
+      fetchWithRetry(async () => {
+        throw new Error('boom');
+      }, signal),
+    ).rejects.toThrow(SourceError);
+    await expect(
+      fetchWithRetry(async () => {
+        throw new Error('boom');
+      }, signal),
+    ).rejects.toMatchObject({ attempts: 3, message: 'boom' });
   });
 });
