@@ -14,13 +14,15 @@
 
 请求是异步的，不挡住会话启动：启动时先用上次保存的名单注册一份，请求成功后写入新名单并重新注册，失败则沿用已注册的那份并写一条日志。
 
+请求带重试，策略照抄 pi 自己的 `fetchWithRetry`：同一个超时预算（10 秒）内最多尝试 3 次，可重试的状态码为 408、425、429、500、502、503、504，传输错误也重试，两次尝试之间不等待。
+
 名单来源（外部环境）隔离在 `AvailableModelsSource` 接口后面，默认实现 `createOpencodeGoSource` 走 opencode 接口，`refresh` 接收来源工厂，换数据源只改这一处。
 
 配置与数据都在 `~/.pi/agent/model-filter/`：
 
 - `model-exclude.json` —— 排除清单，格式 `{ "provider 名": ["模型 id"] }`，按完整 id 精确匹配。
 - `available-models.json` —— 上一次接口返回的 id 名单，结构 `{ provider, updatedAt, ids }`。
-- `requests.log` —— 请求日志，每行一条 JSON，字段 `at`、`provider`、`url`、`outcome`、`durationMs`、`status`、`idCount`、`error`。
+- `requests.log` —— 请求日志，每行一条 JSON，字段 `at`、`provider`、`url`、`outcome`、`durationMs`、`attempts`、`status`、`idCount`、`error`。
 
 配置或名单文件不合法时就地抛出错误。
 
@@ -78,7 +80,7 @@ pi -ne -nc -ns -np -nt -p "只回答 ok" --no-session \
 cat agent/model-filter/requests.log
 ```
 
-已经实测通过的路径：首次运行（启动瞬间是 pi 的完整列表，请求返回后变成 15 个）、第二次启动（启动瞬间就是 15 个）、离线启动（不发请求、不写日志，列表仍是 15 个）、请求失败（列表保持 15 个，日志记一条 `failure`）。
+已经实测通过的路径：首次运行（启动瞬间是 pi 的完整列表，请求返回后变成 15 个）、第二次启动（启动瞬间就是 15 个）、离线启动（不发请求、不写日志，列表仍是 15 个）、请求失败（列表保持 15 个，日志记一条 `failure`，`attempts` 为 3）。
 
 失败注入的办法：临时给 `~/.pi/agent/models.json` 的 `opencode-go` 加一个指向无效地址的 `baseUrl`，跑完删掉。
 
@@ -96,7 +98,7 @@ npm run test        # vitest
 
 ## 文件地图
 
-- `index.ts` —— 插件入口。`parseModelIds()` 响应解析与 `selectModels()` 三层过滤是纯函数；`createOpencodeGoSource()` 是默认的名单来源，`refresh()` 负责编排（取名单、写文件、重新注册、记日志），`loadExcludes()` 读清单，`loadAvailableIds()` 与 `saveAvailableIds()` 读写名单，`appendLog()` 写日志，`applyFilter()` 计算并注册。
+- `index.ts` —— 插件入口。`parseModelIds()` 响应解析、`selectModels()` 三层过滤、`fetchWithRetry()` 重试都是纯函数；`createOpencodeGoSource()` 是默认的名单来源，`refresh()` 负责编排（取名单、写文件、重新注册、记日志），`loadExcludes()` 读清单，`loadAvailableIds()` 与 `saveAvailableIds()` 读写名单，`appendLog()` 写日志，`applyFilter()` 计算并注册。
 - `index.test.ts` —— 上述纯函数的单元测试，15 个用例。
 - `SPEC.md` —— 实现规格。
 - `~/.pi/agent/model-filter/model-exclude.json` —— 排除清单（被 `~/.pi` 仓库跟踪）。
