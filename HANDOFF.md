@@ -14,9 +14,11 @@
 
 请求是异步的，不挡住会话启动：启动时先用上次保存的名单注册一份，请求成功后写入新名单并重新注册，失败则沿用已注册的那份并写一条日志。
 
+名单来源（外部环境）隔离在 `AvailableModelsSource` 接口后面，默认实现 `createOpencodeGoSource` 走 opencode 接口，`refresh` 接收来源工厂，换数据源只改这一处。
+
 配置与数据都在 `~/.pi/agent/model-filter/`：
 
-- `model-exclude.json` —— 排除清单，格式 `{ "provider 名": ["模型 id", "支持 * 通配符"] }`。
+- `model-exclude.json` —— 排除清单，格式 `{ "provider 名": ["模型 id"] }`，按完整 id 精确匹配。
 - `available-models.json` —— 上一次接口返回的 id 名单，结构 `{ provider, updatedAt, ids }`。
 - `requests.log` —— 请求日志，每行一条 JSON，字段 `at`、`provider`、`url`、`outcome`、`durationMs`、`status`、`idCount`、`error`。
 
@@ -61,6 +63,7 @@ issue 里五个待决问题的结论：pi 那边查不到参数的模型一律�
 - **同一个 provider 下模型的 `baseUrl` 会随接口类型不同**：opencode-go 的 `anthropic-messages` 模型用 `https://opencode.ai/zen/go`，`openai-completions` 模型用 `https://opencode.ai/zen/go/v1`。模型列表接口属于 OpenAI 兼容端点，插件取 `openai-completions` 模型的地址再拼 `/models`。改用第一个模型的地址会拼出 `/zen/go/models`，接口返回 404。
 - provider 级别没有 `baseUrl`，`provider.baseUrl` 是 undefined，地址挂在模型条目上。
 - `pi --list-models` 不走会话流程，不受过滤影响，看到的是未过滤的完整列表。
+- pi.dev 远端目录的条目带完整参数，包括价格（`cost` 的四个字段）、上下文长度、输出上限、输入类型、是否支持思考与兼容开关。pi.dev 收录一个模型之后，插件不需要给它补任何参数。
 
 ## 验证方式
 
@@ -93,7 +96,7 @@ npm run test        # vitest
 
 ## 文件地图
 
-- `index.ts` —— 插件入口。`matches()` 通配符匹配、`parseModelIds()` 响应解析、`selectModels()` 三层过滤都是纯函数；`loadExcludes()` 读清单，`loadAvailableIds()` 与 `saveAvailableIds()` 读写名单，`appendLog()` 写日志，`refresh()` 发请求，`applyFilter()` 计算并注册。
+- `index.ts` —— 插件入口。`parseModelIds()` 响应解析与 `selectModels()` 三层过滤是纯函数；`createOpencodeGoSource()` 是默认的名单来源，`refresh()` 负责编排（取名单、写文件、重新注册、记日志），`loadExcludes()` 读清单，`loadAvailableIds()` 与 `saveAvailableIds()` 读写名单，`appendLog()` 写日志，`applyFilter()` 计算并注册。
 - `index.test.ts` —— 上述纯函数的单元测试，15 个用例。
 - `SPEC.md` —— 实现规格。
 - `~/.pi/agent/model-filter/model-exclude.json` —— 排除清单（被 `~/.pi` 仓库跟踪）。
