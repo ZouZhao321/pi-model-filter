@@ -62,7 +62,17 @@ export class SourceError extends Error {
   }
 }
 
-// 带重试的请求。调用方取消是终态的；可重试的状态码会把响应体丢弃之后再试一次。
+// 丢弃响应体。响应体本来就要丢弃，取消失败时无事可做，与 pi 的实现一致。
+async function cancelBody(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // 无事可做。
+  }
+}
+
+// 带重试的请求：可重试的状态码，以及任何未被调用方取消的错误，都会再试一次
+// （与 pi 的 fetchWithRetry 一致）；重试之前丢弃上一次的响应体。
 export async function fetchWithRetry(
   doFetch: (signal: AbortSignal) => Promise<Response>,
   signal: AbortSignal,
@@ -77,11 +87,7 @@ export async function fetchWithRetry(
       if (!RETRYABLE_STATUS_CODES.has(response.status) || attempts >= maxAttempts) {
         return { response, attempts };
       }
-      try {
-        await response.body?.cancel();
-      } catch {
-        // 响应体本来就要丢弃，取消失败时无事可做，与 pi 的实现一致。
-      }
+      await cancelBody(response);
     } catch (error) {
       if (signal.aborted) throw error;
       if (attempts >= maxAttempts) {
@@ -123,19 +129,23 @@ export function createOpencodeGoSource(ctx: ExtensionContext): AvailableModelsSo
         signal,
       );
       if (!response.ok) {
+        await cancelBody(response);
         throw new SourceError(`接口返回 HTTP ${response.status}`, attempts, response.status);
       }
       let payload: unknown;
       try {
         payload = await response.json();
       } catch (error) {
+        if (signal.aborted) {
+          throw new SourceError('请求已中止（超时或调用方取消）', attempts, response.status);
+        }
         throw new SourceError(
           `响应不是合法 JSON：${error instanceof Error ? error.message : String(error)}`,
           attempts,
           response.status,
         );
       }
-      return { ids: parseModelIds(payload), attempts };
+      return { ids: toModelIds(payload, attempts, response.status), attempts };
     },
   };
 }
@@ -263,6 +273,15 @@ export function parseModelIds(payload: unknown): string[] {
     ids.push(id);
   }
   return [...new Set(ids)];
+}
+
+// 结构不对时把解析错误也统一成 SourceError，日志才能拿到尝试次数与状态码。
+export function toModelIds(payload: unknown, attempts: number, status: number): string[] {
+  try {
+    return parseModelIds(payload);
+  } catch (error) {
+    throw new SourceError(error instanceof Error ? error.message : String(error), attempts, status);
+  }
 }
 
 // 三层过滤：来源给的 id 里没有的丢弃，pi 列表里查不到元数据的丢弃，命中排除清单的丢弃。
