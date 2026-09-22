@@ -1,19 +1,21 @@
 // 按 model-filter/model-exclude.json 的排除清单，从会话的模型列表里剔除指定模型。
 //
-// 列表来源分三层：先向 opencode 的模型接口要一份当前凭据可用的模型 id，
-// 再到 pi 的模型列表里取元数据（取不到的丢弃），最后套排除清单。
+// 列表来源分三层：先向名单来源要一份当前凭据可用的模型 id，再到 pi 的模型列表里
+// 取元数据（取不到的丢弃），最后套排除清单。名单来源是外部环境，隔离在
+// AvailableModelsSource 接口后面，默认实现走 opencode 接口，可以整体替换。
 //
-// 为什么用扩展而不是 models.json：pi 解析 models.json 时是 upsert 语义
-// （dist/core/provider-composer.js 的 applyModelsJson 先整份复制内置模型，
-// 再按 id 覆盖或追加），没有任何删除入口；而扩展的 registerProvider 在
-// 提供 models 时是替换语义（同文件 applyExtension：config.models 存在时
-// 直接 map 返回，不保留原有条目）。
+// 为什么用扩展而不是 models.json：opencode-go 是 pi 内置的 provider，pi 解析
+// models.json 时对模型是 upsert 语义（dist/core/provider-composer.js 的
+// applyModelsJson 先整份复制内置模型，再按 id 覆盖或追加），能加能改，没有删除
+// 入口；而扩展的 registerProvider 在提供 models 时是替换语义（同文件
+// applyExtension：config.models 存在时直接 map 返回，不保留原有条目），这是唯一
+// 能真正缩减内置 provider 列表的方式。
 //
-// 时机必须放在 session_start：factory 阶段拿到的内置目录不完整，还有一批
-// 模型是运行期从远端目录刷新的，到 session_start 才齐。
+// 时机必须放在 session_start：factory 阶段拿到的内置目录不完整，还有一批模型是
+// 运行期从远端目录刷新的，到 session_start 才齐。
 //
 // 请求是异步发起的，不挡住会话启动：启动时先用上次保存的名单注册一份，
-// 请求成功后写入新名单并重新注册，失败则继续用保存的那份并记日志。
+// 请求成功后写入新名单并重新注册，失败则继续用已注册的那份并记日志。
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -27,8 +29,60 @@ const AVAILABLE_PATH = join(DATA_DIR, 'available-models.json');
 const LOG_PATH = join(DATA_DIR, 'requests.log');
 const REQUEST_TIMEOUT_MS = 10_000;
 
-// 配置格式：provider 名 -> 要排除的模型 id 数组，元素支持 * 通配符。
-// 例：{ "opencode-go": ["glm-5.3", "muse-spark-*"] }
+/** 名单来源：外部环境只出现在这个接口的实现里，换数据源时整体替换。 */
+export interface AvailableModelsSource {
+  /** 请求地址，只用于写日志 */
+  readonly url: string;
+  fetchIds(signal: AbortSignal): Promise<string[]>;
+}
+
+export type SourceFactory = (ctx: ExtensionContext) => AvailableModelsSource;
+
+/** 带 HTTP 状态码的错误，方便日志记下状态码。 */
+export class HttpError extends Error {
+  readonly status: number;
+
+  constructor(status: number) {
+    super(`接口返回 HTTP ${status}`);
+    this.status = status;
+  }
+}
+
+// 默认来源：opencode Go 的模型列表接口。
+export function createOpencodeGoSource(ctx: ExtensionContext): AvailableModelsSource {
+  const provider = ctx.modelRegistry.getProvider(PROVIDER_ID);
+  if (!provider) throw new Error(`找不到 provider ${PROVIDER_ID}`);
+  // provider 级别不一定带 baseUrl。同一个 provider 下模型的地址会随接口类型不同
+  // （opencode-go 的 anthropic-messages 模型用 /zen/go，openai-completions 模型
+  // 用 /zen/go/v1），而模型列表接口是 OpenAI 兼容端点，所以取后者的地址。
+  const baseUrl =
+    provider.baseUrl ??
+    provider.getModels().find((model) => model.api === 'openai-completions' && model.baseUrl)
+      ?.baseUrl;
+  if (!baseUrl) throw new Error(`provider ${PROVIDER_ID} 没有可用的 baseUrl`);
+  const url = `${baseUrl.replace(/\/+$/, '')}/models`;
+  return {
+    url,
+    async fetchIds(signal) {
+      const key = await ctx.modelRegistry.getApiKeyForProvider(PROVIDER_ID);
+      if (!key) throw new Error('没有可用的凭据');
+      const response = await fetch(url, {
+        headers: {
+          accept: 'application/json',
+          authorization: `Bearer ${key}`,
+          'x-opencode-session': randomUUID(),
+          'x-opencode-client': 'pi',
+        },
+        signal,
+      });
+      if (!response.ok) throw new HttpError(response.status);
+      return parseModelIds(await response.json());
+    },
+  };
+}
+
+// 配置格式：provider 名 -> 要排除的模型 id 数组，按完整 id 精确匹配。
+// 例：{ "opencode-go": ["glm-5.3", "kimi-k3"] }
 function loadExcludes(): Map<string, string[]> {
   const excludes = new Map<string, string[]>();
   if (!existsSync(EXCLUDE_PATH)) return excludes;
@@ -51,15 +105,15 @@ function loadExcludes(): Map<string, string[]> {
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
     throw new Error(`${EXCLUDE_PATH} 的顶层必须是一个对象：provider 名 -> 模型 id 数组`);
   }
-  for (const [providerId, patterns] of Object.entries(parsed as Record<string, unknown>)) {
-    if (!Array.isArray(patterns)) {
+  for (const [providerId, ids] of Object.entries(parsed as Record<string, unknown>)) {
+    if (!Array.isArray(ids)) {
       throw new Error(`${EXCLUDE_PATH} 里 ${providerId} 的值必须是字符串数组`);
     }
-    const list = patterns.map((pattern) => {
-      if (typeof pattern !== 'string') {
+    const list = ids.map((id) => {
+      if (typeof id !== 'string') {
         throw new Error(`${EXCLUDE_PATH} 里 ${providerId} 的数组只能放字符串`);
       }
-      return pattern;
+      return id;
     });
     if (list.length > 0) excludes.set(providerId, list);
   }
@@ -72,7 +126,7 @@ interface AvailableModelsFile {
   ids: string[];
 }
 
-// 读上一次从接口拿到的 id 名单。文件不存在时返回 undefined。
+// 读上一次从名单来源拿到的 id 名单。文件不存在时返回 undefined。
 function loadAvailableIds(): string[] | undefined {
   if (!existsSync(AVAILABLE_PATH)) return undefined;
   let raw: string;
@@ -132,15 +186,6 @@ function appendLog(entry: RequestLogEntry): void {
   appendFileSync(LOG_PATH, `${JSON.stringify(entry)}\n`, 'utf-8');
 }
 
-export function matches(pattern: string, modelId: string): boolean {
-  if (!pattern.includes('*')) return pattern === modelId;
-  const body = pattern
-    .split('*')
-    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-    .join('.*');
-  return new RegExp(`^${body}$`).test(modelId);
-}
-
 // 按 OpenAI 兼容格式取 data 数组里的 id：条目缺 id 的跳过，同一个 id 只留一次。
 export function parseModelIds(payload: unknown): string[] {
   if (
@@ -160,27 +205,26 @@ export function parseModelIds(payload: unknown): string[] {
   return [...new Set(ids)];
 }
 
-// 三层过滤：接口给的 id 里没有的丢弃，pi 列表里查不到元数据的丢弃，命中排除清单的丢弃。
+// 三层过滤：来源给的 id 里没有的丢弃，pi 列表里查不到元数据的丢弃，命中排除清单的丢弃。
 export function selectModels<T extends { id: string }>(
   availableIds: readonly string[],
   providerModels: readonly T[],
-  patterns: readonly string[],
+  excludedIds: readonly string[],
 ): T[] {
   const available = new Set(availableIds);
-  return providerModels.filter(
-    (model) => available.has(model.id) && !patterns.some((pattern) => matches(pattern, model.id)),
-  );
+  const excluded = new Set(excludedIds);
+  return providerModels.filter((model) => available.has(model.id) && !excluded.has(model.id));
 }
 
 function applyFilter(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
   ids: readonly string[],
-  patterns: readonly string[],
+  excludedIds: readonly string[],
 ): void {
   const provider = ctx.modelRegistry.getProvider(PROVIDER_ID);
   if (!provider) return;
-  const kept = selectModels(ids, provider.getModels(), patterns);
+  const kept = selectModels(ids, provider.getModels(), excludedIds);
   pi.registerProvider(PROVIDER_ID, {
     name: provider.name,
     baseUrl: provider.baseUrl,
@@ -202,69 +246,27 @@ function applyFilter(
 }
 
 // 后台取一次名单。成功就写入文件并重新注册，失败就沿用已注册的那份并记日志。
-async function refresh(
+export async function refresh(
   pi: ExtensionAPI,
   ctx: ExtensionContext,
-  patterns: readonly string[],
+  excludedIds: readonly string[],
+  sourceFactory: SourceFactory = createOpencodeGoSource,
 ): Promise<void> {
   if (process.env.PI_OFFLINE !== undefined) return;
   const startedAt = Date.now();
   let url = '';
   try {
-    const provider = ctx.modelRegistry.getProvider(PROVIDER_ID);
-    if (!provider) throw new Error(`找不到 provider ${PROVIDER_ID}`);
-    // provider 级别不一定带 baseUrl。同一个 provider 下模型的地址会随接口类型不同
-    // （opencode-go 的 anthropic-messages 模型用 /zen/go，openai-completions 模型
-    // 用 /zen/go/v1），而模型列表接口是 OpenAI 兼容端点，所以取后者的地址。
-    const baseUrl =
-      provider.baseUrl ??
-      provider.getModels().find((model) => model.api === 'openai-completions' && model.baseUrl)
-        ?.baseUrl;
-    if (!baseUrl) throw new Error(`provider ${PROVIDER_ID} 没有可用的 baseUrl`);
-    url = `${baseUrl.replace(/\/+$/, '')}/models`;
-    const key = await ctx.modelRegistry.getApiKeyForProvider(PROVIDER_ID);
-    if (!key) {
-      appendLog({
-        at: new Date().toISOString(),
-        provider: PROVIDER_ID,
-        url,
-        outcome: 'failure',
-        durationMs: Date.now() - startedAt,
-        error: '没有可用的凭据',
-      });
-      return;
-    }
-    const response = await fetch(url, {
-      headers: {
-        accept: 'application/json',
-        authorization: `Bearer ${key}`,
-        'x-opencode-session': randomUUID(),
-        'x-opencode-client': 'pi',
-      },
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-    });
-    if (!response.ok) {
-      appendLog({
-        at: new Date().toISOString(),
-        provider: PROVIDER_ID,
-        url,
-        outcome: 'failure',
-        durationMs: Date.now() - startedAt,
-        status: response.status,
-        error: `接口返回 HTTP ${response.status}`,
-      });
-      return;
-    }
-    const ids = parseModelIds(await response.json());
+    const source = sourceFactory(ctx);
+    url = source.url;
+    const ids = await source.fetchIds(AbortSignal.timeout(REQUEST_TIMEOUT_MS));
     saveAvailableIds(ids);
-    applyFilter(pi, ctx, ids, patterns);
+    applyFilter(pi, ctx, ids, excludedIds);
     appendLog({
       at: new Date().toISOString(),
       provider: PROVIDER_ID,
       url,
       outcome: 'success',
       durationMs: Date.now() - startedAt,
-      status: response.status,
       idCount: ids.length,
     });
   } catch (error) {
@@ -274,6 +276,7 @@ async function refresh(
       url,
       outcome: 'failure',
       durationMs: Date.now() - startedAt,
+      status: error instanceof HttpError ? error.status : undefined,
       error: error instanceof Error ? error.message : String(error),
     });
   }
@@ -281,9 +284,9 @@ async function refresh(
 
 export default function (pi: ExtensionAPI) {
   pi.on('session_start', (_event, ctx) => {
-    const patterns = loadExcludes().get(PROVIDER_ID) ?? [];
+    const excludedIds = loadExcludes().get(PROVIDER_ID) ?? [];
     const saved = loadAvailableIds();
-    if (saved) applyFilter(pi, ctx, saved, patterns);
-    void refresh(pi, ctx, patterns);
+    if (saved) applyFilter(pi, ctx, saved, excludedIds);
+    void refresh(pi, ctx, excludedIds);
   });
 }
