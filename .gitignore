@@ -21,3 +21,6 @@ desktop.ini
 tmp/
 temp/
 *.tmp
+
+# 工作树
+.worktrees/
