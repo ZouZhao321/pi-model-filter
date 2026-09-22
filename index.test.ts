@@ -187,7 +187,9 @@ describe('createOpencodeGoSource', () => {
       modelRegistry: {
         getProvider: () => ({
           baseUrl: 'https://example.com/v1',
-          getModels: () => [{ id: 'a', api: 'openai-completions', baseUrl: 'https://example.com/v1' }],
+          getModels: () => [
+            { id: 'a', api: 'openai-completions', baseUrl: 'https://example.com/v1' },
+          ],
         }),
         getApiKeyForProvider: async () => 'test-key',
       },
