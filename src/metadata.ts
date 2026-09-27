@@ -1,6 +1,7 @@
 // 元数据来源与解析：从 npm 包的 markdown 文档（command-code 的 models.md）取
 // cost、推理档位与上下文长度。解析只按来源声明给的列下标与解析器名干活。
 // 三个值解析器都是纯函数，遇到不符合预期的写法就地抛出，错误带上原字符串。
+import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { ABORT_MESSAGE, cancelBody, fetchWithRetry, SourceError } from './retry.ts';
 import type {
   MetadataCost,
@@ -91,7 +92,7 @@ function stripBackticks(value: string): string {
 // 表头行（分隔行的上一行）与 |---| 分隔行跳过；列下标与解析器名只来自声明，换一份声明结果就跟着变。
 export function parseMetadataDocument(
   markdown: string,
-  declaration: MetadataDeclaration,
+  declaration: Extract<MetadataDeclaration, { kind: 'npm-package-doc' }>,
 ): Map<string, MetadataEntry> {
   const tableRows: string[] = [];
   for (const line of markdown.split(/\r?\n/)) {
@@ -120,7 +121,7 @@ export function parseMetadataDocument(
     ) ?? []) as string[];
     const cost = parseWith(valueParsers.cost, cells[columns.cost] ?? '') as
       MetadataCost | undefined;
-    entries.set(id, { name, contextWindow, thinkingLevel, cost });
+    entries.set(id, { name, contextWindow, thinkingLevel, cost } as MetadataEntry);
   }
   return entries;
 }
@@ -144,7 +145,9 @@ function toVersion(payload: unknown, attempts: number, status: number): string {
 // 所有失败路径都抛 SourceError，日志才能稳定拿到 attempts 与 status。
 export function createNpmPackageDocSource(declaration: ProviderDeclaration): MetadataSource {
   const metadata = declaration.metadata;
-  if (!metadata) throw new Error(`provider ${declaration.sourceProviderId} 没有声明 metadata`);
+  if (metadata?.kind !== 'npm-package-doc') {
+    throw new Error(`provider ${declaration.sourceProviderId} 没有声明 npm-package-doc metadata`);
+  }
   const versionUrl = metadata.versionUrl.replaceAll('{package}', metadata.package);
   return {
     url: versionUrl,
@@ -215,4 +218,32 @@ export function createNpmPackageDocSource(declaration: ProviderDeclaration): Met
       return { version, entries, attempts: attempts + fileResult.attempts };
     },
   };
+}
+
+/** pi-model-list：从会话启动时已经完整加载的 provider 目录复制模型定义。 */
+export function readPiModelMetadata(
+  ctx: ExtensionContext,
+  providerId: string,
+): Map<string, MetadataEntry> {
+  const provider = ctx.modelRegistry.getProvider(providerId);
+  if (!provider) throw new Error(`找不到 provider ${providerId}`);
+  const entries = new Map<string, MetadataEntry>();
+  for (const model of provider.getModels()) {
+    const definition: MetadataEntry = {
+      id: model.id,
+      name: model.name,
+      api: model.api,
+      baseUrl: model.baseUrl,
+      reasoning: model.reasoning,
+      thinkingLevelMap: model.thinkingLevelMap,
+      input: [...model.input],
+      cost: { ...model.cost },
+      contextWindow: model.contextWindow,
+      maxTokens: model.maxTokens,
+      samplingParams: model.samplingParams,
+      compat: model.compat,
+    };
+    entries.set(model.id, definition);
+  }
+  return entries;
 }

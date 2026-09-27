@@ -9,6 +9,7 @@ import type {
   MetadataFields,
   MetadataValueParsers,
   ProviderDeclaration,
+  RequestHeaderValue,
   ValueParserName,
 } from './types.ts';
 
@@ -16,7 +17,7 @@ const KNOWN_CATALOG_KINDS = ['http-model-list'];
 const KNOWN_ENVELOPES = ['openai-data-array'];
 const KNOWN_AUTH_HEADERS = ['bearer'];
 const KNOWN_FIELD_NAMES = new Set(['id', 'name', 'contextWindow', 'endpoints']);
-const KNOWN_METADATA_KINDS = ['npm-package-doc'];
+const KNOWN_METADATA_KINDS = ['npm-package-doc', 'pi-model-list'];
 const KNOWN_METADATA_FORMATS = ['markdown-table'];
 const KNOWN_VALUE_PARSERS = ['size-suffix', 'comma-list', 'price-slash-cache'];
 const KNOWN_METADATA_COLUMNS = new Set(['id', 'name', 'contextWindow', 'thinkingLevel', 'cost']);
@@ -67,15 +68,20 @@ function dataFileName(
   return name;
 }
 
-function parseRequestHeaders(value: unknown, where: string): Record<string, string> {
+function parseRequestHeaders(value: unknown, where: string): Record<string, RequestHeaderValue> {
   if (value === undefined) return {};
   const own = asObject(value, `${where} 的 requestHeaders`);
-  const headers: Record<string, string> = {};
+  const headers: Record<string, RequestHeaderValue> = {};
   for (const [key, item] of Object.entries(own)) {
-    if (typeof item !== 'string') {
-      return fail(`${where} 的 requestHeaders.${key} 必须是字符串`);
+    if (typeof item === 'string') {
+      headers[key] = item;
+      continue;
     }
-    headers[key] = item;
+    const generator = asObject(item, `${where} 的 requestHeaders.${key}`).generator;
+    if (generator !== 'uuid') {
+      return fail(`${where} 的 requestHeaders.${key}.generator 不认识 ${String(generator)}（已知：uuid）`);
+    }
+    headers[key] = { generator: 'uuid' };
   }
   return headers;
 }
@@ -146,6 +152,7 @@ function parseMetadata(value: unknown, providerId: string): MetadataDeclaration 
   if (!KNOWN_METADATA_KINDS.includes(kind)) {
     return fail(`${where}.kind 不认识 ${kind}（已知：${KNOWN_METADATA_KINDS.join('、')}）`);
   }
+  if (kind === 'pi-model-list') return { kind };
   const format = requiredString(own, 'format', where);
   if (!KNOWN_METADATA_FORMATS.includes(format)) {
     return fail(`${where}.format 不认识 ${format}（已知：${KNOWN_METADATA_FORMATS.join('、')}）`);
@@ -172,9 +179,9 @@ function parseFields(value: unknown, where: string): CatalogFields {
   }
   return {
     id: requiredString(own, 'id', fieldsWhere),
-    name: requiredString(own, 'name', fieldsWhere),
-    contextWindow: requiredString(own, 'contextWindow', fieldsWhere),
-    endpoints: requiredString(own, 'endpoints', fieldsWhere),
+    name: optionalString(own, 'name', fieldsWhere),
+    contextWindow: optionalString(own, 'contextWindow', fieldsWhere),
+    endpoints: optionalString(own, 'endpoints', fieldsWhere),
   };
 }
 
@@ -239,7 +246,7 @@ export function parseProvidersConfig(raw: unknown): Map<string, ProviderDeclarat
       declaration = {
         sourceProviderId: providerId,
         name: requiredString(own, 'name', where),
-        baseUrl: requiredString(own, 'baseUrl', where),
+        baseUrl: optionalString(own, 'baseUrl', where),
         api: requiredString(own, 'api', where),
         compat: parseCompat(own.compat, where),
         catalog: parseCatalog(own.catalog, providerId),

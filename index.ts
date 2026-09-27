@@ -1,11 +1,7 @@
-// 每次会话启动时维护每个 provider 的模型列表：先把上一次的目录缓存（连同元数据缓存）注册一份，
+// 每次会话启动时维护每个 provider 的模型列表：先把上一次的目录缓存（连同元数据）注册一份，
 // 再在后台按来源声明请求目录与元数据，成功后写入新缓存并重新注册，失败则沿用已注册的那份并记日志。
 // 引用同一个来源的 provider 共用一次请求与一份缓存，排除表按完整 id 精确匹配，
 // 显示名各取自己声明里的那份（引用声明可以带 name 覆盖被引用方的显示名）。
-//
-// opencode-go 暂时走旧路径（T6 才迁移到来源声明）：向名单来源要一份当前凭据可用的模型 id，
-// 再到 pi 的模型列表里取元数据（取不到的丢弃），最后套排除清单。名单来源是外部环境，
-// 隔离在 AvailableModelsSource 接口后面，默认实现走 opencode 接口，可以整体替换。
 //
 // 为什么用扩展而不是 models.json：opencode-go 是 pi 内置的 provider，pi 解析
 // models.json 时对模型是 upsert 语义（dist/core/provider-composer.js 的
@@ -29,23 +25,20 @@ import type {
   ExtensionContext,
   ProviderModelConfig,
 } from '@earendil-works/pi-coding-agent';
-import { createHttpModelListSource, createOpencodeGoSource } from './src/catalog.ts';
-import { applyFilter, composeModels, registerCatalogModels } from './src/compose.ts';
+import { createHttpModelListSource } from './src/catalog.ts';
+import { composeModels, registerCatalogModels } from './src/compose.ts';
 import {
-  loadAvailableIds,
   loadCatalogCache,
   loadExcludes,
   loadMetadataCache,
   loadModelExtras,
   loadProviders,
-  PROVIDER_ID,
   REQUEST_TIMEOUT_MS,
-  saveAvailableIds,
   saveCatalogCache,
   saveMetadataCache,
 } from './src/config.ts';
 import { appendLog, type RequestLogEntry } from './src/log.ts';
-import { createNpmPackageDocSource } from './src/metadata.ts';
+import { createNpmPackageDocSource, readPiModelMetadata } from './src/metadata.ts';
 import { SourceError } from './src/retry.ts';
 import type {
   CatalogEntry,
@@ -55,7 +48,6 @@ import type {
   MetadataSourceFactory,
   ModelExtra,
   ProviderDeclaration,
-  SourceFactory,
 } from './src/types.ts';
 
 /** 会话状态：目录请求在后台进行，可能在会话结束之后才回来。 */
@@ -66,7 +58,6 @@ export interface SessionState {
 
 /** 请求回来之后的副作用。默认写真实缓存与日志，单元测试传入自己的实现。 */
 export interface RefreshEffects {
-  saveAvailableIds(ids: readonly string[]): void;
   saveCatalogCache(providerId: string, entries: readonly CatalogEntry[]): void;
   saveMetadataCache?(
     providerId: string,
@@ -78,56 +69,11 @@ export interface RefreshEffects {
 }
 
 const DEFAULT_EFFECTS: RefreshEffects = {
-  saveAvailableIds,
   saveCatalogCache,
   saveMetadataCache,
   loadMetadataCache,
   appendLog,
 };
-
-// 后台取一次名单。成功就写入文件并重新注册，失败就沿用已注册的那份并记日志。
-// 会话已经结束时只写入文件与日志，跳过注册。
-export async function refresh(
-  pi: ExtensionAPI,
-  ctx: ExtensionContext,
-  excludedIds: readonly string[],
-  session: SessionState,
-  sourceFactory: SourceFactory = createOpencodeGoSource,
-  effects: RefreshEffects = DEFAULT_EFFECTS,
-): Promise<void> {
-  if (process.env.PI_OFFLINE !== undefined) return;
-  const startedAt = Date.now();
-  let url = '';
-  try {
-    const source = sourceFactory(ctx);
-    url = source.url;
-    const { ids, attempts } = await source.fetchIds(AbortSignal.timeout(REQUEST_TIMEOUT_MS));
-    effects.saveAvailableIds(ids);
-    const registered = !session.ended;
-    if (registered) applyFilter(pi, ctx, ids, excludedIds);
-    effects.appendLog({
-      at: new Date().toISOString(),
-      provider: PROVIDER_ID,
-      url,
-      outcome: 'success',
-      durationMs: Date.now() - startedAt,
-      attempts,
-      idCount: ids.length,
-      registered,
-    });
-  } catch (error) {
-    effects.appendLog({
-      at: new Date().toISOString(),
-      provider: PROVIDER_ID,
-      url,
-      outcome: 'failure',
-      durationMs: Date.now() - startedAt,
-      attempts: error instanceof SourceError ? error.attempts : undefined,
-      status: error instanceof SourceError ? error.status : undefined,
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
-}
 
 // 取一次元数据：版本与缓存一致时跳过下载，不一致时下载并解析。
 // 成功时写缓存并返回新结果；失败时沿用上一次缓存并写一条失败日志，没有缓存就返回 undefined。
@@ -179,6 +125,7 @@ export async function refreshCatalog(
   sourceFactory: CatalogSourceFactory = createHttpModelListSource,
   effects: RefreshEffects = DEFAULT_EFFECTS,
   metadataSourceFactory: MetadataSourceFactory = createNpmPackageDocSource,
+  sessionMetadata?: ReadonlyMap<string, MetadataEntry>,
 ): Promise<void> {
   if (process.env.PI_OFFLINE !== undefined) return;
   const startedAt = Date.now();
@@ -192,14 +139,15 @@ export async function refreshCatalog(
     );
     effects.saveCatalogCache(sourceProviderId, entries);
 
-    const metadataEntries = declaration.metadata
-      ? await fetchMetadataForComposition(
-          sourceProviderId,
-          declaration,
-          metadataSourceFactory,
-          effects,
-        )
-      : undefined;
+    const metadataEntries =
+      declaration.metadata?.kind === 'npm-package-doc'
+        ? await fetchMetadataForComposition(
+            sourceProviderId,
+            declaration,
+            metadataSourceFactory,
+            effects,
+          )
+        : sessionMetadata;
 
     const composed = composeModels(declaration, entries, excludedIds, metadataEntries, extras);
     const registered = !session.ended;
@@ -278,13 +226,6 @@ export default function (pi: ExtensionAPI) {
   pi.on('session_start', (_event, ctx) => {
     session.ended = false;
 
-    // opencode-go 的旧路径（T6 才迁移到来源声明）
-    const excludes = loadExcludes();
-    const excludedIds = excludes.get(PROVIDER_ID) ?? [];
-    const saved = loadAvailableIds();
-    if (saved) applyFilter(pi, ctx, saved, excludedIds);
-    void refresh(pi, ctx, excludedIds, session);
-
     // providers.json 里声明过的 provider
     for (const { declaration, providers } of groupBySource(loadProviders())) {
       const catalogExcludedIds = declaration.exclusions
@@ -293,18 +234,35 @@ export default function (pi: ExtensionAPI) {
       const extras = declaration.extras
         ? loadModelExtras(declaration.extras).get(declaration.sourceProviderId)
         : undefined;
+      const sessionMetadata =
+        declaration.metadata?.kind === 'pi-model-list'
+          ? readPiModelMetadata(ctx, declaration.sourceProviderId)
+          : undefined;
       const cached = loadCatalogCache(declaration.sourceProviderId);
       if (cached) {
-        const metadataEntries = declaration.metadata
-          ? loadMetadataCache(declaration.sourceProviderId)?.entries
-          : undefined;
+        const metadataEntries =
+          declaration.metadata?.kind === 'npm-package-doc'
+            ? loadMetadataCache(declaration.sourceProviderId)?.entries
+            : sessionMetadata;
         registerCatalog(
           pi,
           providers,
           composeModels(declaration, cached, catalogExcludedIds, metadataEntries, extras).models,
         );
       }
-      void refreshCatalog(pi, ctx, providers, declaration, catalogExcludedIds, extras, session);
+      void refreshCatalog(
+        pi,
+        ctx,
+        providers,
+        declaration,
+        catalogExcludedIds,
+        extras,
+        session,
+        createHttpModelListSource,
+        DEFAULT_EFFECTS,
+        createNpmPackageDocSource,
+        sessionMetadata,
+      );
     }
   });
 }
