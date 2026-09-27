@@ -1,14 +1,9 @@
 // parseModelIds()、toModelIds()、selectModels()、fetchWithRetry() 与默认来源的单元测试。
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { describe, expect, it, vi } from 'vitest';
-import {
-  createOpencodeGoSource,
-  fetchWithRetry,
-  parseModelIds,
-  selectModels,
-  SourceError,
-  toModelIds,
-} from './index.ts';
+import { createOpencodeGoSource, parseModelIds, toModelIds } from './src/catalog.ts';
+import { selectModels } from './src/compose.ts';
+import { fetchWithRetry, SourceError } from './src/retry.ts';
 
 describe('parseModelIds', () => {
   it('取 data 数组里的 id', () => {
