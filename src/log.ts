@@ -11,6 +11,8 @@ export interface RequestLogEntry {
   attempts?: number;
   status?: number;
   idCount?: number;
+  /** 成功响应里是否真的走到了注册；会话在响应到达之前结束时为 false。失败响应不带这一项。 */
+  registered?: boolean;
   error?: string;
 }
 
