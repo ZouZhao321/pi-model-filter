@@ -1,12 +1,5 @@
-// 注册与合并：旧路径的三层过滤与注册，以及新路径的合并函数。
-// 旧路径：来源给的 id 里没有的丢弃，pi 列表里查不到元数据的丢弃，命中排除清单的丢弃。
-// 新路径：目录条目里接口分组没有 /chat/completions 的丢弃，套排除表，其余字段按来源取值。
-import type {
-  ExtensionAPI,
-  ExtensionContext,
-  ProviderModelConfig,
-} from '@earendil-works/pi-coding-agent';
-import { PROVIDER_ID } from './config.ts';
+// 目录、元数据、参数补充表与排除表的合并和注册。
+import type { ExtensionAPI, ProviderModelConfig } from '@earendil-works/pi-coding-agent';
 import type {
   CatalogEntry,
   MetadataEntry,
@@ -19,46 +12,6 @@ const CHAT_COMPLETIONS_PATH = '/chat/completions';
 // 补充表没有的用默认值并记入待补列表。
 const DEFAULT_MAX_TOKENS = 16_384;
 const THINKING_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
-
-// 三层过滤：来源给的 id 里没有的丢弃，pi 列表里查不到元数据的丢弃，命中排除清单的丢弃。
-export function selectModels<T extends { id: string }>(
-  availableIds: readonly string[],
-  providerModels: readonly T[],
-  excludedIds: readonly string[],
-): T[] {
-  const available = new Set(availableIds);
-  const excluded = new Set(excludedIds);
-  return providerModels.filter((model) => available.has(model.id) && !excluded.has(model.id));
-}
-
-export function applyFilter(
-  pi: ExtensionAPI,
-  ctx: ExtensionContext,
-  ids: readonly string[],
-  excludedIds: readonly string[],
-): void {
-  const provider = ctx.modelRegistry.getProvider(PROVIDER_ID);
-  if (!provider) return;
-  const kept = selectModels(ids, provider.getModels(), excludedIds);
-  pi.registerProvider(PROVIDER_ID, {
-    name: provider.name,
-    baseUrl: provider.baseUrl,
-    models: kept.map((model) => ({
-      id: model.id,
-      name: model.name,
-      api: model.api,
-      baseUrl: model.baseUrl,
-      reasoning: model.reasoning,
-      thinkingLevelMap: model.thinkingLevelMap,
-      input: model.input,
-      cost: model.cost,
-      contextWindow: model.contextWindow,
-      maxTokens: model.maxTokens,
-      samplingParams: model.samplingParams,
-      compat: model.compat,
-    })),
-  });
-}
 
 // 六个推理档位里出现的写档位本身，没出现的写 null。
 function toThinkingLevelMap(levels: readonly string[]): Record<string, string | null> {
@@ -88,34 +41,52 @@ export function composeModels(
 ): ComposeResult {
   const excluded = new Set(excludedIds);
   const pendingExtras: string[] = [];
-  const models = entries
-    .filter((entry) => entry.endpoints.includes(CHAT_COMPLETIONS_PATH) && !excluded.has(entry.id))
+  const orderedEntries =
+    declaration.metadata?.kind === 'pi-model-list' && metadata
+      ? [...metadata.keys()]
+          .filter((id) => entries.some((entry) => entry.id === id))
+          .map((id) => entries.find((entry) => entry.id === id)!)
+      : entries;
+  const models = orderedEntries
+    .filter(
+      (entry) =>
+        (entry.endpoints === undefined || entry.endpoints.includes(CHAT_COMPLETIONS_PATH)) &&
+        !excluded.has(entry.id) &&
+        (declaration.metadata?.kind !== 'pi-model-list' || metadata?.has(entry.id) === true),
+    )
     .map((entry) => {
       const meta = metadata?.get(entry.id);
       const thinkingLevel = meta?.thinkingLevel ?? [];
-      const metaCost = meta?.cost;
-      const model: ProviderModelConfig = {
+      const model = {
         id: entry.id,
-        name: entry.name,
+        name: entry.name ?? entry.id,
         api: declaration.api,
-        baseUrl: declaration.baseUrl,
+        ...(declaration.baseUrl === undefined ? {} : { baseUrl: declaration.baseUrl }),
         reasoning: thinkingLevel.length > 0,
         thinkingLevelMap: toThinkingLevelMap(thinkingLevel),
         input: ['text'],
-        cost: metaCost
-          ? {
-              input: metaCost.input,
-              output: metaCost.output,
-              cacheRead: metaCost.cacheRead,
-              cacheWrite: metaCost.cacheWrite ?? 0,
-            }
-          : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: entry.contextWindow,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: entry.contextWindow ?? 0,
         maxTokens: DEFAULT_MAX_TOKENS,
         compat: declaration.compat,
-      };
+        ...meta,
+      } as ProviderModelConfig & { thinkingLevel?: string[] };
+      delete model.thinkingLevel;
+      if (meta?.cost && meta.thinkingLevel !== undefined) {
+        model.cost = {
+          input: meta.cost.input,
+          output: meta.cost.output,
+          cacheRead: meta.cost.cacheRead,
+          cacheWrite: meta.cost.cacheWrite ?? 0,
+        };
+      }
+      if (entry.name !== undefined) model.name = entry.name;
+      if (entry.contextWindow !== undefined) model.contextWindow = entry.contextWindow;
       const extra = extras?.get(entry.id);
-      if (typeof extra?.maxTokens !== 'number' || !Array.isArray(extra?.input)) {
+      if (
+        (typeof extra?.maxTokens !== 'number' && typeof meta?.maxTokens !== 'number') ||
+        (!Array.isArray(extra?.input) && !Array.isArray(meta?.input))
+      ) {
         pendingExtras.push(entry.id);
       }
       if (extra) {
@@ -140,7 +111,7 @@ export function registerCatalogModels(
 ): void {
   pi.registerProvider(providerId, {
     name: declaration.name,
-    baseUrl: declaration.baseUrl,
+    ...(declaration.baseUrl === undefined ? {} : { baseUrl: declaration.baseUrl }),
     api: declaration.api,
     models: [...models],
   });

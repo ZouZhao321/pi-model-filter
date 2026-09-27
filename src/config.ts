@@ -1,4 +1,4 @@
-// 配置与数据文件的读写。provider 常量与路径集中在这里。
+// 配置与数据文件的读写。路径集中在这里。
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -12,11 +12,9 @@ import type {
   ProviderDeclaration,
 } from './types.ts';
 
-export const PROVIDER_ID = 'opencode-go';
 export const DATA_DIR = join(homedir(), '.pi', 'agent', 'model-filter');
 const EXCLUDE_FILE = 'model-exclude.json';
 const EXTRAS_FILE = 'model-extras.json';
-const AVAILABLE_PATH = join(DATA_DIR, 'available-models.json');
 export const PROVIDERS_PATH = join(DATA_DIR, 'providers.json');
 export const LOG_PATH = join(DATA_DIR, 'requests.log');
 export const REQUEST_TIMEOUT_MS = 10_000;
@@ -131,48 +129,13 @@ export function loadModelExtras(
   return extras;
 }
 
-interface AvailableModelsFile {
-  provider: string;
-  updatedAt: string;
-  ids: string[];
-}
-
-// 读上一次从名单来源拿到的 id 名单。文件不存在时返回 undefined。
-export function loadAvailableIds(): string[] | undefined {
-  if (!existsSync(AVAILABLE_PATH)) return undefined;
-  const parsed = readJsonFile(AVAILABLE_PATH);
-  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error(`${AVAILABLE_PATH} 的顶层必须是一个对象`);
-  }
-  const ids = (parsed as { ids?: unknown }).ids;
-  if (!Array.isArray(ids)) {
-    throw new Error(`${AVAILABLE_PATH} 里缺少 ids 数组`);
-  }
-  return ids.map((id) => {
-    if (typeof id !== 'string') {
-      throw new Error(`${AVAILABLE_PATH} 里 ids 只能放字符串`);
-    }
-    return id;
-  });
-}
-
-export function saveAvailableIds(ids: readonly string[]): void {
-  mkdirSync(DATA_DIR, { recursive: true });
-  const payload: AvailableModelsFile = {
-    provider: PROVIDER_ID,
-    updatedAt: new Date().toISOString(),
-    ids: [...ids],
-  };
-  writeFileSync(AVAILABLE_PATH, `${JSON.stringify(payload, null, 2)}\n`, 'utf-8');
-}
-
 interface CatalogCacheFile {
   provider: string;
   updatedAt: string;
   entries: CatalogEntry[];
 }
 
-// 目录缓存按 provider 分开存放，不碰旧路径的 available-models.json。
+// 目录缓存按 provider 分开存放。
 export function catalogCachePath(providerId: string): string {
   return join(DATA_DIR, `catalog-${providerId}.json`);
 }
@@ -183,16 +146,25 @@ function toCatalogEntry(value: unknown, path: string): CatalogEntry {
   }
   const record = value as Record<string, unknown>;
   const { id, name, contextWindow, endpoints } = record;
-  if (typeof id !== 'string' || typeof name !== 'string') {
-    throw new Error(`${path} 里 entries 的 id 与 name 必须是字符串`);
+  if (typeof id !== 'string') throw new Error(`${path} 里 entries 的 id 必须是字符串`);
+  if (name !== undefined && typeof name !== 'string') {
+    throw new Error(`${path} 里 entries 的 name 必须是字符串`);
   }
-  if (typeof contextWindow !== 'number') {
+  if (contextWindow !== undefined && typeof contextWindow !== 'number') {
     throw new Error(`${path} 里 entries 的 contextWindow 必须是数字`);
   }
-  if (!Array.isArray(endpoints) || !endpoints.every((item) => typeof item === 'string')) {
+  if (
+    endpoints !== undefined &&
+    (!Array.isArray(endpoints) || !endpoints.every((item) => typeof item === 'string'))
+  ) {
     throw new Error(`${path} 里 entries 的 endpoints 必须是字符串数组`);
   }
-  return { id, name, contextWindow, endpoints };
+  return {
+    id,
+    ...(typeof name === 'string' ? { name } : {}),
+    ...(typeof contextWindow === 'number' ? { contextWindow } : {}),
+    ...(Array.isArray(endpoints) ? { endpoints: endpoints as string[] } : {}),
+  };
 }
 
 // 读上一次拿到的目录条目。文件不存在时返回 undefined。
@@ -237,35 +209,24 @@ function toMetadataCost(value: unknown, path: string): MetadataCost {
   if (cacheWrite !== undefined && typeof cacheWrite !== 'number') {
     throw new Error(`${path} 里 metadata 的 cost 的 cacheWrite 必须是数字`);
   }
-  return {
-    input,
-    output,
-    cacheRead,
-    cacheWrite: cacheWrite as number | undefined,
-  };
+  return { input, output, cacheRead, cacheWrite: cacheWrite as number | undefined };
 }
 
 function toMetadataEntry(value: unknown, path: string): MetadataEntry {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error(`${path} 里 metadata entries 的每一项必须是对象`);
   }
-  const record = value as Record<string, unknown>;
-  const { name, contextWindow, thinkingLevel, cost } = record;
-  if (typeof name !== 'string') {
-    throw new Error(`${path} 里 metadata entries 的 name 必须是字符串`);
+  const record = { ...(value as Record<string, unknown>) };
+  if (record.thinkingLevel !== undefined) {
+    if (
+      !Array.isArray(record.thinkingLevel) ||
+      !record.thinkingLevel.every((item) => typeof item === 'string')
+    ) {
+      throw new Error(`${path} 里 metadata entries 的 thinkingLevel 必须是字符串数组`);
+    }
   }
-  if (contextWindow !== undefined && typeof contextWindow !== 'number') {
-    throw new Error(`${path} 里 metadata entries 的 contextWindow 必须是数字`);
-  }
-  if (!Array.isArray(thinkingLevel) || !thinkingLevel.every((item) => typeof item === 'string')) {
-    throw new Error(`${path} 里 metadata entries 的 thinkingLevel 必须是字符串数组`);
-  }
-  return {
-    name,
-    contextWindow: contextWindow as number | undefined,
-    thinkingLevel: thinkingLevel as string[],
-    cost: cost === undefined ? undefined : toMetadataCost(cost, path),
-  };
+  if (record.cost !== undefined) record.cost = toMetadataCost(record.cost, path);
+  return record as MetadataEntry;
 }
 
 // 读上一次拿到的元数据。文件不存在时返回 undefined。

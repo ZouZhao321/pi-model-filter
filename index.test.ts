@@ -1,23 +1,19 @@
-// parseModelIds()、toModelIds()、parseCatalogEntries()、toCatalogEntries()、selectModels()、
-// composeModels()、parseProvidersConfig()、createOpencodeGoSource()、createHttpModelListSource()、
-// refresh()、refreshCatalog() 与 fetchWithRetry() 的单元测试。
+// 目录解析、模型合并、来源声明、元数据来源、refreshCatalog() 与重试策略的单元测试。
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { refresh, refreshCatalog, type ProviderRef } from './index.ts';
+import { refreshCatalog, type ProviderRef } from './index.ts';
 import {
   createHttpModelListSource,
-  createOpencodeGoSource,
   parseCatalogEntries,
-  parseModelIds,
   toCatalogEntries,
-  toModelIds,
 } from './src/catalog.ts';
-import { composeModels, selectModels } from './src/compose.ts';
+import { composeModels } from './src/compose.ts';
 import { loadModelExtras } from './src/config.ts';
 import {
   createNpmPackageDocSource,
+  readPiModelMetadata,
   parseCommaList,
   parseMetadataDocument,
   parsePriceSlashCache,
@@ -34,82 +30,7 @@ import type {
   MetadataSourceFactory,
   ModelExtra,
   ProviderDeclaration,
-  SourceFactory,
 } from './src/types.ts';
-
-describe('parseModelIds', () => {
-  it('取 data 数组里的 id', () => {
-    expect(parseModelIds({ data: [{ id: 'a' }, { id: 'b' }] })).toEqual(['a', 'b']);
-  });
-
-  it('条目缺 id 或者不是对象时跳过', () => {
-    expect(parseModelIds({ data: [{ id: 'a' }, {}, null, 'x', { id: 3 }] })).toEqual(['a']);
-  });
-
-  it('同一个 id 只留一次', () => {
-    expect(parseModelIds({ data: [{ id: 'a' }, { id: 'a' }] })).toEqual(['a']);
-  });
-
-  it('结构里没有 data 数组时抛出', () => {
-    expect(() => parseModelIds({ models: [] })).toThrow();
-    expect(() => parseModelIds(null)).toThrow();
-  });
-});
-
-describe('toModelIds', () => {
-  it('结构正常时返回去重后的 id', () => {
-    expect(toModelIds({ data: [{ id: 'a' }, { id: 'a' }] }, 1, 200)).toEqual(['a']);
-  });
-
-  it('结构不对时抛出带尝试次数与状态码的 SourceError', () => {
-    let thrown: unknown;
-    try {
-      toModelIds({ models: [] }, 2, 200);
-    } catch (error) {
-      thrown = error;
-    }
-    expect(thrown).toBeInstanceOf(SourceError);
-    expect(thrown).toMatchObject({ attempts: 2, status: 200 });
-  });
-});
-
-describe('selectModels', () => {
-  const piModels = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
-
-  it('只保留来源给出且 pi 认识的模型', () => {
-    expect(selectModels(['a', 'c'], piModels, []).map((model) => model.id)).toEqual(['a', 'c']);
-  });
-
-  it('来源给出但 pi 不认识的模型丢弃', () => {
-    expect(selectModels(['a', 'zzz'], piModels, []).map((model) => model.id)).toEqual(['a']);
-  });
-
-  it('命中排除清单的模型不出现', () => {
-    expect(selectModels(['a', 'b', 'c'], piModels, ['b']).map((model) => model.id)).toEqual([
-      'a',
-      'c',
-    ]);
-  });
-
-  it('排除清单按完整 id 匹配，前缀相同的其他 id 不受影响', () => {
-    const models = [{ id: 'glm-5.1' }, { id: 'glm-5.1-flash' }];
-    expect(
-      selectModels(['glm-5.1', 'glm-5.1-flash'], models, ['glm-5.1']).map((model) => model.id),
-    ).toEqual(['glm-5.1-flash']);
-  });
-
-  it('名单为空时结果为空', () => {
-    expect(selectModels([], piModels, [])).toEqual([]);
-  });
-
-  it('排除清单覆盖全部模型时结果为空', () => {
-    expect(selectModels(['a', 'b', 'c'], piModels, ['a', 'b', 'c'])).toEqual([]);
-  });
-
-  it('保留 pi 列表里的顺序', () => {
-    expect(selectModels(['c', 'a'], piModels, []).map((model) => model.id)).toEqual(['a', 'c']);
-  });
-});
 
 describe('fetchWithRetry', () => {
   const signal = new AbortController().signal;
@@ -208,36 +129,6 @@ describe('fetchWithRetry', () => {
   });
 });
 
-describe('createOpencodeGoSource', () => {
-  function fakeContext(): ExtensionContext {
-    return {
-      modelRegistry: {
-        getProvider: () => ({
-          baseUrl: 'https://example.com/v1',
-          getModels: () => [
-            { id: 'a', api: 'openai-completions', baseUrl: 'https://example.com/v1' },
-          ],
-        }),
-        getApiKeyForProvider: async () => 'test-key',
-      },
-    } as unknown as ExtensionContext;
-  }
-
-  it('响应体读取阶段被中止时抛 SourceError', async () => {
-    const controller = new AbortController();
-    vi.stubGlobal('fetch', async () => {
-      controller.abort();
-      return new Response('not json', { status: 200 });
-    });
-    try {
-      const source = createOpencodeGoSource(fakeContext());
-      await expect(source.fetchIds(controller.signal)).rejects.toThrow(SourceError);
-    } finally {
-      vi.unstubAllGlobals();
-    }
-  });
-});
-
 // 一份与 providers.json 同形的配置对象：commandcode 声明目录来源，commandcode-2 引用它。
 const CATALOG_OBJECT = {
   kind: 'http-model-list',
@@ -327,7 +218,7 @@ describe('parseProvidersConfig', () => {
     });
   });
 
-  it('requestHeaders 与 compat 可以省略', () => {
+  it('baseUrl、requestHeaders 与 compat 可以省略', () => {
     const providers = parseProvidersConfig(
       configObject({ compat: undefined }, { requestHeaders: undefined, authHeader: undefined }),
     );
@@ -335,12 +226,11 @@ describe('parseProvidersConfig', () => {
       compat: undefined,
       catalog: { requestHeaders: {}, authHeader: undefined },
     });
+    const noBaseUrl = parseProvidersConfig(configObject({ baseUrl: undefined }));
+    expect(noBaseUrl.get('commandcode')?.baseUrl).toBeUndefined();
   });
 
   it('缺必填项时抛出，错误信息带上 provider 名与缺的项', () => {
-    expect(() => parseProvidersConfig(configObject({ baseUrl: undefined }))).toThrow(
-      'providers.json 里 provider commandcode 缺少必填项 baseUrl',
-    );
     expect(() => parseProvidersConfig(configObject({ name: undefined }))).toThrow(
       'providers.json 里 provider commandcode 缺少必填项 name',
     );
@@ -350,11 +240,6 @@ describe('parseProvidersConfig', () => {
     expect(() => parseProvidersConfig(configObject({}, { url: undefined }))).toThrow(
       'providers.json 里 provider commandcode 的 catalog 缺少必填项 url',
     );
-    expect(() =>
-      parseProvidersConfig(
-        configObject({}, { fields: { id: 'id', name: 'name', contextWindow: 'context_length' } }),
-      ),
-    ).toThrow('providers.json 里 provider commandcode 的 catalog 的 fields 缺少必填项 endpoints');
   });
 
   it('缺 catalog 时抛出', () => {
@@ -451,7 +336,7 @@ describe('parseProvidersConfig', () => {
       kind: 'npm-package-json',
     };
     expect(() => parseProvidersConfig(config)).toThrow(
-      'providers.json 里 provider commandcode 的 metadata.kind 不认识 npm-package-json（已知：npm-package-doc）',
+      'providers.json 里 provider commandcode 的 metadata.kind 不认识 npm-package-json（已知：npm-package-doc、pi-model-list）',
     );
   });
 
@@ -606,7 +491,10 @@ describe('parseCatalogEntries', () => {
 describe('createHttpModelListSource', () => {
   function fakeContext(key: string | undefined): ExtensionContext {
     return {
-      modelRegistry: { getApiKeyForProvider: async () => key },
+      modelRegistry: {
+        getProvider: () => undefined,
+        getApiKeyForProvider: async () => key,
+      },
     } as unknown as ExtensionContext;
   }
 
@@ -644,6 +532,57 @@ describe('createHttpModelListSource', () => {
         url: 'https://api.commandcode.ai/provider/v1/models',
         headers: { accept: 'application/json', authorization: 'Bearer secret' },
       });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('动态 uuid 请求头每次请求重新生成，并从 pi 模型定义取得缺省 baseUrl', async () => {
+    const calls: { url: string; headers: Record<string, string> }[] = [];
+    vi.stubGlobal('fetch', async (url: string, init: RequestInit = {}) => {
+      calls.push({ url, headers: init.headers as Record<string, string> });
+      return Response.json({ data: [{ id: 'a' }] }, { status: 200 });
+    });
+    const declaration = parseProvidersConfig({
+      'opencode-go': {
+        name: 'OpenCode Go',
+        api: 'openai-completions',
+        catalog: {
+          kind: 'http-model-list',
+          url: '{baseUrl}/models',
+          requestHeaders: {
+            accept: 'application/json',
+            'x-opencode-session': { generator: 'uuid' },
+          },
+          authHeader: 'bearer',
+          envelope: 'openai-data-array',
+          fields: { id: 'id' },
+        },
+        metadata: { kind: 'pi-model-list' },
+      },
+    }).get('opencode-go')!;
+    const ctx = {
+      modelRegistry: {
+        getProvider: () => ({
+          getModels: () => [
+            { id: 'a', api: 'openai-completions', baseUrl: 'https://opencode.ai/zen/go/v1' },
+          ],
+        }),
+        getApiKeyForProvider: async () => 'secret',
+      },
+    } as unknown as ExtensionContext;
+    try {
+      const source = createHttpModelListSource(ctx, 'opencode-go', declaration);
+      await source.fetchEntries(new AbortController().signal);
+      await source.fetchEntries(new AbortController().signal);
+      expect(source.url).toBe('https://opencode.ai/zen/go/v1/models');
+      expect(calls[0].headers['x-opencode-session']).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      );
+      expect(calls[1].headers['x-opencode-session']).not.toBe(
+        calls[0].headers['x-opencode-session'],
+      );
+      expect(calls[0].headers.authorization).toBe('Bearer secret');
     } finally {
       vi.unstubAllGlobals();
     }
@@ -1009,6 +948,123 @@ describe('composeModels', () => {
     });
   });
 
+  it('opencode-go 迁移前后的同一输入逐字段相同', () => {
+    const declaration = parseProvidersConfig({
+      'opencode-go': {
+        name: 'OpenCode Go',
+        api: 'openai-completions',
+        catalog: {
+          kind: 'http-model-list',
+          url: '{baseUrl}/models',
+          envelope: 'openai-data-array',
+          fields: { id: 'id' },
+        },
+        metadata: { kind: 'pi-model-list' },
+      },
+    }).get('opencode-go')!;
+    const piModels = [
+      {
+        id: 'a',
+        name: 'A',
+        api: 'anthropic-messages',
+        baseUrl: 'https://example.com/go',
+        reasoning: true,
+        thinkingLevelMap: { high: 'high' },
+        input: ['text', 'image'],
+        cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0.2 },
+        contextWindow: 200000,
+        maxTokens: 64000,
+        samplingParams: { temperature: 0.5 },
+        compat: { supportsDeveloperRole: false },
+      },
+      {
+        id: 'b',
+        name: 'B',
+        api: 'openai-completions',
+        baseUrl: 'https://example.com/go/v1',
+        reasoning: false,
+        input: ['text'],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 100000,
+        maxTokens: 32000,
+      },
+    ];
+    const endpointIds = ['unknown', 'b', 'a'];
+    const excludedIds = ['b'];
+    const available = new Set(endpointIds);
+    const excluded = new Set(excludedIds);
+    const legacyOutput = piModels.filter(
+      (model) => available.has(model.id) && !excluded.has(model.id),
+    );
+    const metadata = new Map(piModels.map((model) => [model.id, model]));
+    const migratedOutput = composeModels(
+      declaration,
+      endpointIds.map((id) => ({ id })),
+      excludedIds,
+      metadata,
+    );
+    expect(migratedOutput.models).toEqual(legacyOutput);
+    expect(migratedOutput.pendingExtras).toEqual([]);
+  });
+
+  it('pi 模型元数据完整覆盖默认值，并按目录名单与排除表筛选', () => {
+    const declaration = parseProvidersConfig({
+      'opencode-go': {
+        name: 'OpenCode Go',
+        api: 'openai-completions',
+        catalog: {
+          kind: 'http-model-list',
+          url: '{baseUrl}/models',
+          envelope: 'openai-data-array',
+          fields: { id: 'id' },
+        },
+        metadata: { kind: 'pi-model-list' },
+      },
+    }).get('opencode-go')!;
+    const piModels = [
+      {
+        id: 'a',
+        name: 'A',
+        api: 'anthropic-messages',
+        baseUrl: 'https://example.com/go',
+        reasoning: true,
+        thinkingLevelMap: { high: 'high' },
+        input: ['text', 'image'],
+        cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0.2 },
+        contextWindow: 200000,
+        maxTokens: 64000,
+        samplingParams: { temperature: 0.5 },
+        compat: { supportsDeveloperRole: false },
+      },
+      {
+        id: 'b',
+        name: 'B',
+        api: 'openai-completions',
+        baseUrl: 'https://example.com/go/v1',
+        reasoning: false,
+        input: ['text'],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 100000,
+        maxTokens: 32000,
+      },
+    ];
+    const metadata = readPiModelMetadata(
+      {
+        modelRegistry: {
+          getProvider: () => ({ getModels: () => piModels }),
+        },
+      } as unknown as ExtensionContext,
+      'opencode-go',
+    );
+    const result = composeModels(
+      declaration,
+      [{ id: 'unknown' }, { id: 'b' }, { id: 'a' }],
+      ['b'],
+      metadata,
+    );
+    expect(result).toEqual({ models: [piModels[0]], pendingExtras: [] });
+  });
+
   it('补充表没写 contextWindow 时端点胜出', () => {
     const metadata = new Map<string, MetadataEntry>([
       [
@@ -1092,7 +1148,7 @@ describe('refresh 与 refreshCatalog 的会话结束处理', () => {
   }
 
   function fakeEffects() {
-    return { saveAvailableIds: vi.fn(), saveCatalogCache: vi.fn(), appendLog: vi.fn() };
+    return { saveCatalogCache: vi.fn(), appendLog: vi.fn() };
   }
 
   function catalogSource(list: CatalogEntry[]): CatalogSourceFactory {
@@ -1101,33 +1157,6 @@ describe('refresh 与 refreshCatalog 的会话结束处理', () => {
       fetchEntries: async () => ({ entries: list, attempts: 1 }),
     });
   }
-
-  function opencodeGoPi(): {
-    pi: ExtensionAPI;
-    registered: { providerId: string; name: string; modelCount: number }[];
-    getProvider: ReturnType<typeof vi.fn>;
-    ctx: ExtensionContext;
-  } {
-    const { pi, registered } = fakePi();
-    const getProvider = vi.fn(() => ({
-      name: 'opencode-go',
-      baseUrl: 'https://opencode.ai/zen/go/v1',
-      getModels: () => [
-        { id: 'glm-5.2', api: 'openai-completions', baseUrl: 'https://opencode.ai/zen/go/v1' },
-      ],
-    }));
-    return {
-      pi,
-      registered,
-      getProvider,
-      ctx: { modelRegistry: { getProvider } } as unknown as ExtensionContext,
-    };
-  }
-
-  const listSource: SourceFactory = () => ({
-    url: 'https://opencode.ai/zen/go/v1/models',
-    fetchIds: async () => ({ ids: ['glm-5.2'], attempts: 1 }),
-  });
 
   it('会话未结束时注册并写日志，日志标注 registered: true', async () => {
     const { pi, registered } = fakePi();
@@ -1176,30 +1205,6 @@ describe('refresh 与 refreshCatalog 的会话结束处理', () => {
     expect(effects.saveCatalogCache).toHaveBeenCalledWith('commandcode', entries);
     expect(effects.appendLog).toHaveBeenCalledWith(
       expect.objectContaining({ outcome: 'success', idCount: 1, registered: false }),
-    );
-  });
-
-  it('旧路径会话未结束时注册并写名单文件', async () => {
-    const { pi, registered, getProvider, ctx } = opencodeGoPi();
-    const effects = fakeEffects();
-    await refresh(pi, ctx, [], { ended: false }, listSource, effects);
-    expect(getProvider).toHaveBeenCalled();
-    expect(registered).toEqual([{ providerId: 'opencode-go', name: 'opencode-go', modelCount: 1 }]);
-    expect(effects.saveAvailableIds).toHaveBeenCalledWith(['glm-5.2']);
-    expect(effects.appendLog).toHaveBeenCalledWith(
-      expect.objectContaining({ provider: 'opencode-go', outcome: 'success', registered: true }),
-    );
-  });
-
-  it('旧路径会话结束时只写名单文件，不碰 ctx 与注册', async () => {
-    const { pi, registered, getProvider, ctx } = opencodeGoPi();
-    const effects = fakeEffects();
-    await refresh(pi, ctx, [], { ended: true }, listSource, effects);
-    expect(getProvider).not.toHaveBeenCalled();
-    expect(registered).toEqual([]);
-    expect(effects.saveAvailableIds).toHaveBeenCalledWith(['glm-5.2']);
-    expect(effects.appendLog).toHaveBeenCalledWith(
-      expect.objectContaining({ outcome: 'success', registered: false }),
     );
   });
 
@@ -1270,7 +1275,6 @@ describe('refreshCatalog 的元数据处理', () => {
   it('元数据下载失败时沿用上一次缓存并写失败日志，目录照常保存', async () => {
     const { pi, registered } = fakePi();
     const effects = {
-      saveAvailableIds: vi.fn(),
       saveCatalogCache: vi.fn(),
       saveMetadataCache: vi.fn(),
       loadMetadataCache: vi.fn(() => cachedMetadata),
