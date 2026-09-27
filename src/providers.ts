@@ -2,12 +2,25 @@
 // 只接受已经实现的来源类型与封装形态，遇到不认识的取值就地抛出。
 // 带 source 的 provider 只能再声明 name，用来覆盖被引用方的显示名；其余项由被引用方决定。
 import type { ProviderModelConfig } from '@earendil-works/pi-coding-agent';
-import type { CatalogDeclaration, CatalogFields, ProviderDeclaration } from './types.ts';
+import type {
+  CatalogDeclaration,
+  CatalogFields,
+  MetadataDeclaration,
+  MetadataFields,
+  MetadataValueParsers,
+  ProviderDeclaration,
+  ValueParserName,
+} from './types.ts';
 
 const KNOWN_CATALOG_KINDS = ['http-model-list'];
 const KNOWN_ENVELOPES = ['openai-data-array'];
 const KNOWN_AUTH_HEADERS = ['bearer'];
 const KNOWN_FIELD_NAMES = new Set(['id', 'name', 'contextWindow', 'endpoints']);
+const KNOWN_METADATA_KINDS = ['npm-package-doc'];
+const KNOWN_METADATA_FORMATS = ['markdown-table'];
+const KNOWN_VALUE_PARSERS = ['size-suffix', 'comma-list', 'price-slash-cache'];
+const KNOWN_METADATA_COLUMNS = new Set(['id', 'name', 'contextWindow', 'thinkingLevel', 'cost']);
+const KNOWN_PARSER_FIELDS = new Set(['contextWindow', 'thinkingLevel', 'cost']);
 
 function fail(message: string): never {
   throw new Error(message);
@@ -71,6 +84,82 @@ function parseCompat(value: unknown, where: string): ProviderModelConfig['compat
   if (value === undefined) return undefined;
   asObject(value, `${where} 的 compat`);
   return value as ProviderModelConfig['compat'];
+}
+
+function columnIndex(source: Record<string, unknown>, key: string, where: string): number {
+  const value = source[key];
+  if (value === undefined) {
+    return fail(`${where} 的 columns 缺少必填项 ${key}`);
+  }
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    return fail(`${where} 的 columns.${key} 必须是非负整数`);
+  }
+  return value;
+}
+
+function parseMetadataColumns(value: unknown, where: string): MetadataFields {
+  const columnsWhere = `${where} 的 columns`;
+  const own = asObject(value, columnsWhere);
+  for (const key of Object.keys(own)) {
+    if (!KNOWN_METADATA_COLUMNS.has(key)) {
+      return fail(`${columnsWhere} 有不认识的项 ${key}`);
+    }
+  }
+  return {
+    id: columnIndex(own, 'id', where),
+    name: columnIndex(own, 'name', where),
+    contextWindow: columnIndex(own, 'contextWindow', where),
+    thinkingLevel: columnIndex(own, 'thinkingLevel', where),
+    cost: columnIndex(own, 'cost', where),
+  };
+}
+
+function parseValueParsers(value: unknown, where: string): MetadataValueParsers {
+  const parsersWhere = `${where} 的 valueParsers`;
+  const own = asObject(value, parsersWhere);
+  for (const key of Object.keys(own)) {
+    if (!KNOWN_PARSER_FIELDS.has(key)) {
+      return fail(`${parsersWhere} 有不认识的项 ${key}`);
+    }
+  }
+  function parserName(key: string): ValueParserName {
+    const name = requiredString(own, key, parsersWhere);
+    if (!KNOWN_VALUE_PARSERS.includes(name)) {
+      return fail(
+        `${parsersWhere}.${key} 不认识 ${name}（已知：${KNOWN_VALUE_PARSERS.join('、')}）`,
+      );
+    }
+    return name as ValueParserName;
+  }
+  return {
+    contextWindow: parserName('contextWindow'),
+    thinkingLevel: parserName('thinkingLevel'),
+    cost: parserName('cost'),
+  };
+}
+
+function parseMetadata(value: unknown, providerId: string): MetadataDeclaration | undefined {
+  if (value === undefined) return undefined;
+  const where = `providers.json 里 provider ${providerId} 的 metadata`;
+  const own = asObject(value, where);
+  const kind = requiredString(own, 'kind', where);
+  if (!KNOWN_METADATA_KINDS.includes(kind)) {
+    return fail(`${where}.kind 不认识 ${kind}（已知：${KNOWN_METADATA_KINDS.join('、')}）`);
+  }
+  const format = requiredString(own, 'format', where);
+  if (!KNOWN_METADATA_FORMATS.includes(format)) {
+    return fail(`${where}.format 不认识 ${format}（已知：${KNOWN_METADATA_FORMATS.join('、')}）`);
+  }
+  return {
+    kind: 'npm-package-doc',
+    package: requiredString(own, 'package', where),
+    file: requiredString(own, 'file', where),
+    versionUrl: requiredString(own, 'versionUrl', where),
+    fileUrl: requiredString(own, 'fileUrl', where),
+    format: 'markdown-table',
+    columns: parseMetadataColumns(own.columns, where),
+    valueParsers: parseValueParsers(own.valueParsers, where),
+  };
 }
 
 function parseFields(value: unknown, where: string): CatalogFields {
@@ -154,6 +243,7 @@ export function parseProvidersConfig(raw: unknown): Map<string, ProviderDeclarat
         api: requiredString(own, 'api', where),
         compat: parseCompat(own.compat, where),
         catalog: parseCatalog(own.catalog, providerId),
+        metadata: parseMetadata(own.metadata, providerId),
         extras: dataFileName(own, 'extras', where),
         exclusions: dataFileName(own, 'exclusions', where),
       };

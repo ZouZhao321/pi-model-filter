@@ -13,12 +13,22 @@ import {
   toModelIds,
 } from './src/catalog.ts';
 import { composeModels, selectModels } from './src/compose.ts';
+import {
+  createNpmPackageDocSource,
+  parseCommaList,
+  parseMetadataDocument,
+  parsePriceSlashCache,
+  parseSizeSuffix,
+} from './src/metadata.ts';
 import { parseProvidersConfig } from './src/providers.ts';
 import { fetchWithRetry, SourceError } from './src/retry.ts';
 import type {
   CatalogDeclaration,
   CatalogEntry,
   CatalogSourceFactory,
+  MetadataCache,
+  MetadataEntry,
+  MetadataSourceFactory,
   ProviderDeclaration,
   SourceFactory,
 } from './src/types.ts';
@@ -268,6 +278,29 @@ function catalogWith(fields: Record<string, string>): CatalogDeclaration {
   return { ...commandcode().catalog, fields: { ...commandcode().catalog.fields, ...fields } };
 }
 
+const METADATA_OBJECT = {
+  kind: 'npm-package-doc',
+  package: 'command-code',
+  file: 'dist/bundled/command-code-knowledge/reference/models.md',
+  versionUrl: 'https://registry.npmjs.org/{package}/latest',
+  fileUrl: 'https://unpkg.com/{package}@{version}/{file}',
+  format: 'markdown-table',
+  columns: { id: 0, name: 1, contextWindow: 2, thinkingLevel: 3, cost: 4 },
+  valueParsers: {
+    contextWindow: 'size-suffix',
+    thinkingLevel: 'comma-list',
+    cost: 'price-slash-cache',
+  },
+};
+
+function commandcodeWithMetadata(): ProviderDeclaration {
+  const config = configObject();
+  (config.commandcode as Record<string, unknown>).metadata = METADATA_OBJECT;
+  const declaration = parseProvidersConfig(config).get('commandcode');
+  if (!declaration) throw new Error('测试配置里没有 commandcode');
+  return declaration;
+}
+
 describe('parseProvidersConfig', () => {
   it('引用声明没写 name 时，引用方与被引用方共用同一份声明', () => {
     const providers = parseProvidersConfig(configObject());
@@ -404,6 +437,61 @@ describe('parseProvidersConfig', () => {
     expect(() => parseProvidersConfig([])).toThrow('providers.json 的顶层 必须是一个对象');
     expect(() => parseProvidersConfig({ commandcode: 'x' })).toThrow(
       'providers.json 里 provider commandcode 必须是一个对象',
+    );
+  });
+
+  it('metadata.kind 不认识时抛出', () => {
+    const config = configObject();
+    (config.commandcode as Record<string, unknown>).metadata = {
+      ...METADATA_OBJECT,
+      kind: 'npm-package-json',
+    };
+    expect(() => parseProvidersConfig(config)).toThrow(
+      'providers.json 里 provider commandcode 的 metadata.kind 不认识 npm-package-json（已知：npm-package-doc）',
+    );
+  });
+
+  it('metadata.format 不认识时抛出', () => {
+    const config = configObject();
+    (config.commandcode as Record<string, unknown>).metadata = {
+      ...METADATA_OBJECT,
+      format: 'csv-table',
+    };
+    expect(() => parseProvidersConfig(config)).toThrow(
+      'providers.json 里 provider commandcode 的 metadata.format 不认识 csv-table（已知：markdown-table）',
+    );
+  });
+
+  it('metadata.valueParsers 的解析器不认识时抛出', () => {
+    const config = configObject();
+    (config.commandcode as Record<string, unknown>).metadata = {
+      ...METADATA_OBJECT,
+      valueParsers: { ...METADATA_OBJECT.valueParsers, cost: 'usd-per-mega' },
+    };
+    expect(() => parseProvidersConfig(config)).toThrow(
+      'providers.json 里 provider commandcode 的 metadata 的 valueParsers.cost 不认识 usd-per-mega（已知：size-suffix、comma-list、price-slash-cache）',
+    );
+  });
+
+  it('metadata.columns 缺必填项时抛出', () => {
+    const config = configObject();
+    (config.commandcode as Record<string, unknown>).metadata = {
+      ...METADATA_OBJECT,
+      columns: { id: 0, name: 1, contextWindow: 2, thinkingLevel: 3 },
+    };
+    expect(() => parseProvidersConfig(config)).toThrow(
+      'providers.json 里 provider commandcode 的 metadata 的 columns 缺少必填项 cost',
+    );
+  });
+
+  it('metadata.columns 有不认识的项时抛出', () => {
+    const config = configObject();
+    (config.commandcode as Record<string, unknown>).metadata = {
+      ...METADATA_OBJECT,
+      columns: { ...METADATA_OBJECT.columns, price: 4 },
+    };
+    expect(() => parseProvidersConfig(config)).toThrow(
+      'providers.json 里 provider commandcode 的 metadata 的 columns 有不认识的项 price',
     );
   });
 });
@@ -577,6 +665,176 @@ describe('createHttpModelListSource', () => {
   });
 });
 
+describe('三个值解析器', () => {
+  it('size-suffix 解析 M、K、小数与纯数字，无值返回 undefined', () => {
+    expect(parseSizeSuffix('1M')).toBe(1000000);
+    expect(parseSizeSuffix('262K')).toBe(262000);
+    expect(parseSizeSuffix('1.05M')).toBe(1050000);
+    expect(parseSizeSuffix('1000000')).toBe(1000000);
+    expect(parseSizeSuffix('—')).toBeUndefined();
+    expect(parseSizeSuffix('')).toBeUndefined();
+  });
+
+  it('size-suffix 遇到不认识的后缀抛出并带原字符串', () => {
+    expect(() => parseSizeSuffix('1G')).toThrow('无法解析 size-suffix 值：1G');
+  });
+
+  it('comma-list 拆分逗号列表，无值返回空数组', () => {
+    expect(parseCommaList('high, max')).toEqual(['high', 'max']);
+    expect(parseCommaList('low, medium, xhigh')).toEqual(['low', 'medium', 'xhigh']);
+    expect(parseCommaList('—')).toEqual([]);
+    expect(parseCommaList('')).toEqual([]);
+  });
+
+  it('price-slash-cache 解析带 write 与不带 write 的价格，$0/$0 也能解析', () => {
+    expect(parsePriceSlashCache('$0.15/$0.6 · cache $0.003')).toEqual({
+      input: 0.15,
+      output: 0.6,
+      cacheRead: 0.003,
+    });
+    expect(parsePriceSlashCache('$2/$6 · cache $0.25 (write $2.5)')).toEqual({
+      input: 2,
+      output: 6,
+      cacheRead: 0.25,
+      cacheWrite: 2.5,
+    });
+    expect(parsePriceSlashCache('$0/$0 · cache $0')).toEqual({
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+    });
+    expect(parsePriceSlashCache('—')).toBeUndefined();
+  });
+
+  it('price-slash-cache 遇到不符合预期的写法抛出并带原字符串', () => {
+    expect(() => parsePriceSlashCache('$0.15/$0.6')).toThrow(
+      '无法解析 price-slash-cache 值：$0.15/$0.6',
+    );
+  });
+});
+
+describe('parseMetadataDocument', () => {
+  const MARKDOWN = [
+    '# Models',
+    '',
+    '## Open Source',
+    '| Id (use EXACTLY this) | Name | Context | Efforts | $/1M in/out · cache read | Min plan | Best for |',
+    '|---|---|---|---|---|---|---|',
+    '| `deepseek/deepseek-v4-pro` | DeepSeek V4 Pro (latest) | 1M | high, max | $0.66/$1.98 · cache $0.022 | Go and above | x |',
+    '| `zai-org/GLM-5.1` | GLM-5.1 | — | — | $1.4/$4.4 · cache $0.26 | Go and above | x |',
+    '',
+    '## Anthropic',
+    '| Id (use EXACTLY this) | Name | Context | Efforts | $/1M in/out · cache read | Min plan | Best for |',
+    '|---|---|---|---|---|---|---|',
+    '| `claude-sonnet-5` | Claude Sonnet 5 | 1M | low, medium, high, xhigh, max | $2/$10 · cache $0.2 (write $2.5) | Pro and above | x |',
+    '',
+  ].join('\n');
+
+  it('跳过表头行与分隔行，把多张表解析成 Map', () => {
+    const declaration = commandcodeWithMetadata();
+    const result = parseMetadataDocument(MARKDOWN, declaration.metadata!);
+    expect(result.size).toBe(3);
+    expect(result.get('deepseek/deepseek-v4-pro')).toEqual({
+      name: 'DeepSeek V4 Pro (latest)',
+      contextWindow: 1000000,
+      thinkingLevel: ['high', 'max'],
+      cost: { input: 0.66, output: 1.98, cacheRead: 0.022 },
+    });
+    expect(result.get('zai-org/GLM-5.1')).toEqual({
+      name: 'GLM-5.1',
+      contextWindow: undefined,
+      thinkingLevel: [],
+      cost: { input: 1.4, output: 4.4, cacheRead: 0.26 },
+    });
+    expect(result.get('claude-sonnet-5')?.cost).toEqual({
+      input: 2,
+      output: 10,
+      cacheRead: 0.2,
+      cacheWrite: 2.5,
+    });
+  });
+
+  it('换一组列映射，解析结果跟着变', () => {
+    const declaration = commandcodeWithMetadata();
+    const md = [
+      '| id | a | b | c | d |',
+      '|---|---|---|---|---|',
+      '| `x` | 1M | 2M | high | $1/$2 · cache $0.5 |',
+    ].join('\n');
+    const swapped: ProviderDeclaration = {
+      ...declaration,
+      metadata: {
+        ...declaration.metadata!,
+        columns: { id: 0, name: 2, contextWindow: 1, thinkingLevel: 3, cost: 4 },
+      },
+    };
+    expect(parseMetadataDocument(md, swapped.metadata!).get('x')).toMatchObject({
+      name: '2M',
+      contextWindow: 1000000,
+      thinkingLevel: ['high'],
+      cost: { input: 1, output: 2, cacheRead: 0.5 },
+    });
+    expect(parseMetadataDocument(md, declaration.metadata!).get('x')).toMatchObject({
+      name: '1M',
+      contextWindow: 2000000,
+    });
+  });
+});
+
+describe('createNpmPackageDocSource', () => {
+  const MARKDOWN = [
+    '| Id | Name | Context | Efforts | $/1M in/out | Min plan | Best for |',
+    '|---|---|---|---|---|---|---|',
+    '| `a` | A | 1M | high | $1/$2 · cache $0.5 | Go | x |',
+    '',
+  ].join('\n');
+
+  it('版本号与缓存一致时只取版本，不下载文档', async () => {
+    const calls: string[] = [];
+    vi.stubGlobal('fetch', async (url: string) => {
+      calls.push(url);
+      return url.includes('registry.npmjs.org')
+        ? Response.json({ version: '1.66.0' }, { status: 200 })
+        : new Response(MARKDOWN, { status: 200 });
+    });
+    try {
+      const source = createNpmPackageDocSource(commandcodeWithMetadata());
+      const result = await source.fetchMetadata(new AbortController().signal, '1.66.0');
+      expect(result).toEqual({ version: '1.66.0', entries: undefined, attempts: 1 });
+      expect(calls).toEqual(['https://registry.npmjs.org/command-code/latest']);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('版本号不同时下载文档并解析', async () => {
+    const calls: string[] = [];
+    vi.stubGlobal('fetch', async (url: string) => {
+      calls.push(url);
+      return url.includes('registry.npmjs.org')
+        ? Response.json({ version: '1.66.0' }, { status: 200 })
+        : new Response(MARKDOWN, { status: 200 });
+    });
+    try {
+      const source = createNpmPackageDocSource(commandcodeWithMetadata());
+      const result = await source.fetchMetadata(new AbortController().signal, '1.65.0');
+      expect(result.version).toBe('1.66.0');
+      expect(result.entries?.get('a')).toMatchObject({
+        name: 'A',
+        contextWindow: 1000000,
+        thinkingLevel: ['high'],
+        cost: { input: 1, output: 2, cacheRead: 0.5 },
+      });
+      expect(calls).toEqual([
+        'https://registry.npmjs.org/command-code/latest',
+        'https://unpkg.com/command-code@1.66.0/dist/bundled/command-code-knowledge/reference/models.md',
+      ]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
 describe('composeModels', () => {
   const entries: CatalogEntry[] = [
     {
@@ -645,11 +903,49 @@ describe('composeModels', () => {
       api: 'openai-completions',
       baseUrl: 'https://api.commandcode.ai/provider/v1',
       reasoning: false,
+      thinkingLevelMap: {
+        minimal: null,
+        low: null,
+        medium: null,
+        high: null,
+        xhigh: null,
+        max: null,
+      },
       input: ['text'],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: 1050000,
       maxTokens: 16384,
       compat: { supportsDeveloperRole: false },
+    });
+  });
+
+  it('metadata 给 cost、thinkingLevelMap 与 reasoning，contextWindow 仍以端点为准', () => {
+    const metadata = new Map<string, MetadataEntry>([
+      [
+        'deepseek/deepseek-v4-pro',
+        {
+          name: 'DeepSeek V4 Pro',
+          contextWindow: 999999,
+          thinkingLevel: ['high', 'max'],
+          cost: { input: 0.66, output: 1.98, cacheRead: 0.022 },
+        },
+      ],
+    ]);
+    const model = composeModels(commandcode(), entries, [], metadata).find(
+      (item) => item.id === 'deepseek/deepseek-v4-pro',
+    );
+    expect(model).toMatchObject({
+      reasoning: true,
+      contextWindow: 1000000,
+      cost: { input: 0.66, output: 1.98, cacheRead: 0.022, cacheWrite: 0 },
+      thinkingLevelMap: {
+        minimal: null,
+        low: null,
+        medium: null,
+        high: 'high',
+        xhigh: null,
+        max: 'max',
+      },
     });
   });
 });
@@ -811,5 +1107,104 @@ describe('refresh 与 refreshCatalog 的会话结束处理', () => {
       expect.objectContaining({ outcome: 'failure', attempts: 1, status: 500 }),
     );
     expect(effects.appendLog.mock.calls[0][0]).not.toHaveProperty('registered');
+  });
+});
+
+describe('refreshCatalog 的元数据处理', () => {
+  const entry: CatalogEntry = {
+    id: 'deepseek/deepseek-v4-pro',
+    name: 'DeepSeek V4 Pro',
+    contextWindow: 1000000,
+    endpoints: ['/chat/completions'],
+  };
+  const providers: ProviderRef[] = [
+    { providerId: 'commandcode', declaration: commandcodeWithMetadata() },
+  ];
+  const cachedMetadata: MetadataCache = {
+    version: '1.66.0',
+    entries: new Map<string, MetadataEntry>([
+      [
+        'deepseek/deepseek-v4-pro',
+        {
+          name: 'DeepSeek V4 Pro',
+          contextWindow: 900000,
+          thinkingLevel: ['high', 'max'],
+          cost: { input: 0.66, output: 1.98, cacheRead: 0.022 },
+        },
+      ],
+    ]),
+  };
+
+  function fakePi() {
+    const registered: { providerId: string; models?: unknown[] }[] = [];
+    const pi = {
+      registerProvider: (providerId: string, config: { models?: unknown[] }) => {
+        registered.push({ providerId, models: config.models });
+      },
+    };
+    return { pi: pi as unknown as ExtensionAPI, registered };
+  }
+
+  it('元数据下载失败时沿用上一次缓存并写失败日志，目录照常保存', async () => {
+    const { pi, registered } = fakePi();
+    const effects = {
+      saveAvailableIds: vi.fn(),
+      saveCatalogCache: vi.fn(),
+      saveMetadataCache: vi.fn(),
+      loadMetadataCache: vi.fn(() => cachedMetadata),
+      appendLog: vi.fn(),
+    };
+    const failingMetadata: MetadataSourceFactory = () => ({
+      url: 'https://registry.npmjs.org/command-code/latest',
+      fetchMetadata: async () => {
+        throw new SourceError('接口返回 HTTP 503', 3, 503);
+      },
+    });
+    const catalogSource: CatalogSourceFactory = () => ({
+      url: 'https://api.commandcode.ai/provider/v1/models',
+      fetchEntries: async () => ({ entries: [entry], attempts: 1 }),
+    });
+
+    await refreshCatalog(
+      pi,
+      {} as ExtensionContext,
+      providers,
+      providers[0].declaration,
+      [],
+      { ended: false },
+      catalogSource,
+      effects,
+      failingMetadata,
+    );
+
+    expect(registered).toEqual([
+      {
+        providerId: 'commandcode',
+        models: [
+          expect.objectContaining({
+            id: 'deepseek/deepseek-v4-pro',
+            reasoning: true,
+            contextWindow: 1000000,
+            cost: { input: 0.66, output: 1.98, cacheRead: 0.022, cacheWrite: 0 },
+            thinkingLevelMap: {
+              minimal: null,
+              low: null,
+              medium: null,
+              high: 'high',
+              xhigh: null,
+              max: 'max',
+            },
+          }),
+        ],
+      },
+    ]);
+    expect(effects.saveCatalogCache).toHaveBeenCalledWith('commandcode', [entry]);
+    expect(effects.saveMetadataCache).not.toHaveBeenCalled();
+    expect(effects.appendLog).toHaveBeenCalledWith(
+      expect.objectContaining({ outcome: 'failure', attempts: 3, status: 503 }),
+    );
+    expect(effects.appendLog).toHaveBeenCalledWith(
+      expect.objectContaining({ outcome: 'success', idCount: 1 }),
+    );
   });
 });
