@@ -3,7 +3,13 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { parseProvidersConfig } from './providers.ts';
-import type { CatalogEntry, ProviderDeclaration } from './types.ts';
+import type {
+  CatalogEntry,
+  MetadataCache,
+  MetadataCost,
+  MetadataEntry,
+  ProviderDeclaration,
+} from './types.ts';
 
 export const PROVIDER_ID = 'opencode-go';
 export const DATA_DIR = join(homedir(), '.pi', 'agent', 'model-filter');
@@ -149,4 +155,90 @@ export function saveCatalogCache(providerId: string, entries: readonly CatalogEn
     entries: [...entries],
   };
   writeFileSync(catalogCachePath(providerId), `${JSON.stringify(payload, null, 2)}\n`, 'utf-8');
+}
+
+// 元数据缓存按 provider 分开存放，文件里是「版本号 + 解析结果」。
+export function metadataCachePath(providerId: string): string {
+  return join(DATA_DIR, `metadata-${providerId}.json`);
+}
+
+function toMetadataCost(value: unknown, path: string): MetadataCost {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`${path} 里 metadata 的 cost 必须是对象`);
+  }
+  const record = value as Record<string, unknown>;
+  const { input, output, cacheRead, cacheWrite } = record;
+  if (typeof input !== 'number' || typeof output !== 'number' || typeof cacheRead !== 'number') {
+    throw new Error(`${path} 里 metadata 的 cost 的 input、output、cacheRead 必须是数字`);
+  }
+  if (cacheWrite !== undefined && typeof cacheWrite !== 'number') {
+    throw new Error(`${path} 里 metadata 的 cost 的 cacheWrite 必须是数字`);
+  }
+  return {
+    input,
+    output,
+    cacheRead,
+    cacheWrite: cacheWrite as number | undefined,
+  };
+}
+
+function toMetadataEntry(value: unknown, path: string): MetadataEntry {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`${path} 里 metadata entries 的每一项必须是对象`);
+  }
+  const record = value as Record<string, unknown>;
+  const { name, contextWindow, thinkingLevel, cost } = record;
+  if (typeof name !== 'string') {
+    throw new Error(`${path} 里 metadata entries 的 name 必须是字符串`);
+  }
+  if (contextWindow !== undefined && typeof contextWindow !== 'number') {
+    throw new Error(`${path} 里 metadata entries 的 contextWindow 必须是数字`);
+  }
+  if (!Array.isArray(thinkingLevel) || !thinkingLevel.every((item) => typeof item === 'string')) {
+    throw new Error(`${path} 里 metadata entries 的 thinkingLevel 必须是字符串数组`);
+  }
+  return {
+    name,
+    contextWindow: contextWindow as number | undefined,
+    thinkingLevel: thinkingLevel as string[],
+    cost: cost === undefined ? undefined : toMetadataCost(cost, path),
+  };
+}
+
+// 读上一次拿到的元数据。文件不存在时返回 undefined。
+export function loadMetadataCache(providerId: string): MetadataCache | undefined {
+  const path = metadataCachePath(providerId);
+  if (!existsSync(path)) return undefined;
+  const parsed = readJsonFile(path);
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`${path} 的顶层必须是一个对象`);
+  }
+  const version = (parsed as { version?: unknown }).version;
+  if (typeof version !== 'string' || version.length === 0) {
+    throw new Error(`${path} 里缺少 version`);
+  }
+  const entries = (parsed as { entries?: unknown }).entries;
+  if (entries === null || typeof entries !== 'object' || Array.isArray(entries)) {
+    throw new Error(`${path} 里 entries 必须是一个对象`);
+  }
+  const map = new Map<string, MetadataEntry>();
+  for (const [id, entry] of Object.entries(entries as Record<string, unknown>)) {
+    map.set(id, toMetadataEntry(entry, path));
+  }
+  return { version, entries: map };
+}
+
+export function saveMetadataCache(
+  providerId: string,
+  version: string,
+  entries: ReadonlyMap<string, MetadataEntry>,
+): void {
+  mkdirSync(DATA_DIR, { recursive: true });
+  const payload = {
+    provider: providerId,
+    version,
+    updatedAt: new Date().toISOString(),
+    entries: Object.fromEntries(entries),
+  };
+  writeFileSync(metadataCachePath(providerId), `${JSON.stringify(payload, null, 2)}\n`, 'utf-8');
 }

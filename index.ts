@@ -1,5 +1,5 @@
-// 每次会话启动时维护每个 provider 的模型列表：先把上一次的目录缓存注册一份，
-// 再在后台按来源声明请求目录，成功后写入新缓存并重新注册，失败则沿用已注册的那份并记日志。
+// 每次会话启动时维护每个 provider 的模型列表：先把上一次的目录缓存（连同元数据缓存）注册一份，
+// 再在后台按来源声明请求目录与元数据，成功后写入新缓存并重新注册，失败则沿用已注册的那份并记日志。
 // 引用同一个来源的 provider 共用一次请求与一份缓存，排除表按完整 id 精确匹配，
 // 显示名各取自己声明里的那份（引用声明可以带 name 覆盖被引用方的显示名）。
 //
@@ -22,8 +22,8 @@
 // 但不调注册接口，因为 pi 已经把这一轮的 pi 与 ctx 判成失效。
 //
 // 具体实现按职责分在 src/ 下：types 放共享类型，retry 放重试策略，providers 放来源声明
-// 校验，catalog 放目录来源与响应解析，compose 放合并与注册，config 放路径与配置读写，
-// log 放日志。本文件只做编排。
+// 校验，catalog 放目录来源与响应解析，metadata 放 npm 包文档的元数据来源与解析，
+// compose 放合并与注册，config 放路径与配置读写，log 放日志。本文件只做编排。
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -35,17 +35,23 @@ import {
   loadAvailableIds,
   loadCatalogCache,
   loadExcludes,
+  loadMetadataCache,
   loadProviders,
   PROVIDER_ID,
   REQUEST_TIMEOUT_MS,
   saveAvailableIds,
   saveCatalogCache,
+  saveMetadataCache,
 } from './src/config.ts';
 import { appendLog, type RequestLogEntry } from './src/log.ts';
+import { createNpmPackageDocSource } from './src/metadata.ts';
 import { SourceError } from './src/retry.ts';
 import type {
   CatalogEntry,
   CatalogSourceFactory,
+  MetadataCache,
+  MetadataEntry,
+  MetadataSourceFactory,
   ProviderDeclaration,
   SourceFactory,
 } from './src/types.ts';
@@ -60,10 +66,22 @@ export interface SessionState {
 export interface RefreshEffects {
   saveAvailableIds(ids: readonly string[]): void;
   saveCatalogCache(providerId: string, entries: readonly CatalogEntry[]): void;
+  saveMetadataCache?(
+    providerId: string,
+    version: string,
+    entries: ReadonlyMap<string, MetadataEntry>,
+  ): void;
+  loadMetadataCache?(providerId: string): MetadataCache | undefined;
   appendLog(entry: RequestLogEntry): void;
 }
 
-const DEFAULT_EFFECTS: RefreshEffects = { saveAvailableIds, saveCatalogCache, appendLog };
+const DEFAULT_EFFECTS: RefreshEffects = {
+  saveAvailableIds,
+  saveCatalogCache,
+  saveMetadataCache,
+  loadMetadataCache,
+  appendLog,
+};
 
 // 后台取一次名单。成功就写入文件并重新注册，失败就沿用已注册的那份并记日志。
 // 会话已经结束时只写入文件与日志，跳过注册。
@@ -109,7 +127,44 @@ export async function refresh(
   }
 }
 
+// 取一次元数据：版本与缓存一致时跳过下载，不一致时下载并解析。
+// 成功时写缓存并返回新结果；失败时沿用上一次缓存并写一条失败日志，没有缓存就返回 undefined。
+async function fetchMetadataForComposition(
+  sourceProviderId: string,
+  declaration: ProviderDeclaration,
+  sourceFactory: MetadataSourceFactory,
+  effects: RefreshEffects,
+): Promise<Map<string, MetadataEntry> | undefined> {
+  const cached = effects.loadMetadataCache?.(sourceProviderId);
+  const source = sourceFactory(declaration);
+  const startedAt = Date.now();
+  try {
+    const { version, entries } = await source.fetchMetadata(
+      AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      cached?.version,
+    );
+    if (entries) {
+      (effects.saveMetadataCache ?? saveMetadataCache)(sourceProviderId, version, entries);
+      return entries;
+    }
+    return cached?.entries;
+  } catch (error) {
+    effects.appendLog({
+      at: new Date().toISOString(),
+      provider: sourceProviderId,
+      url: source.url,
+      outcome: 'failure',
+      durationMs: Date.now() - startedAt,
+      attempts: error instanceof SourceError ? error.attempts : undefined,
+      status: error instanceof SourceError ? error.status : undefined,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return cached?.entries;
+  }
+}
+
 // 后台取一次目录。成功就写入缓存并重新注册，失败就沿用已注册的那份并记日志。
+// 声明了 metadata 的 provider 还会在同一轮里刷新元数据：元数据失败只影响参数，不影响目录。
 // 会话已经结束时只写入缓存与日志，跳过注册。
 export async function refreshCatalog(
   pi: ExtensionAPI,
@@ -120,6 +175,7 @@ export async function refreshCatalog(
   session: SessionState,
   sourceFactory: CatalogSourceFactory = createHttpModelListSource,
   effects: RefreshEffects = DEFAULT_EFFECTS,
+  metadataSourceFactory: MetadataSourceFactory = createNpmPackageDocSource,
 ): Promise<void> {
   if (process.env.PI_OFFLINE !== undefined) return;
   const startedAt = Date.now();
@@ -132,9 +188,23 @@ export async function refreshCatalog(
       AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     );
     effects.saveCatalogCache(sourceProviderId, entries);
+
+    const metadataEntries = declaration.metadata
+      ? await fetchMetadataForComposition(
+          sourceProviderId,
+          declaration,
+          metadataSourceFactory,
+          effects,
+        )
+      : undefined;
+
     const registered = !session.ended;
     if (registered)
-      registerCatalog(pi, providers, composeModels(declaration, entries, excludedIds));
+      registerCatalog(
+        pi,
+        providers,
+        composeModels(declaration, entries, excludedIds, metadataEntries),
+      );
     effects.appendLog({
       at: new Date().toISOString(),
       provider: sourceProviderId,
@@ -222,7 +292,14 @@ export default function (pi: ExtensionAPI) {
         : [];
       const cached = loadCatalogCache(declaration.sourceProviderId);
       if (cached) {
-        registerCatalog(pi, providers, composeModels(declaration, cached, catalogExcludedIds));
+        const metadataEntries = declaration.metadata
+          ? loadMetadataCache(declaration.sourceProviderId)?.entries
+          : undefined;
+        registerCatalog(
+          pi,
+          providers,
+          composeModels(declaration, cached, catalogExcludedIds, metadataEntries),
+        );
       }
       void refreshCatalog(pi, ctx, providers, declaration, catalogExcludedIds, session);
     }

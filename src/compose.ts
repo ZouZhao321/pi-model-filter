@@ -7,11 +7,12 @@ import type {
   ProviderModelConfig,
 } from '@earendil-works/pi-coding-agent';
 import { PROVIDER_ID } from './config.ts';
-import type { CatalogEntry, ProviderDeclaration } from './types.ts';
+import type { CatalogEntry, MetadataEntry, ProviderDeclaration } from './types.ts';
 
 const CHAT_COMPLETIONS_PATH = '/chat/completions';
-// reasoning、cost、maxTokens、input 暂时取固定值：T4 换成元数据来源，T5 换成补充表。
+// reasoning、cost、thinkingLevelMap 来自 npm 包的模型目录；maxTokens、input 暂时取固定值（T5 再补）。
 const DEFAULT_MAX_TOKENS = 16_384;
+const THINKING_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 
 // 三层过滤：来源给的 id 里没有的丢弃，pi 列表里查不到元数据的丢弃，命中排除清单的丢弃。
 export function selectModels<T extends { id: string }>(
@@ -53,28 +54,52 @@ export function applyFilter(
   });
 }
 
-// 合并：目录条目 + provider 定义 + 排除表 -> pi 的模型定义数组。
-// 保持目录里的先后次序；目录为空时返回空数组。
+// 六个推理档位里出现的写档位本身，没出现的写 null。
+function toThinkingLevelMap(levels: readonly string[]): Record<string, string | null> {
+  const map: Record<string, string | null> = {};
+  for (const level of THINKING_LEVELS) {
+    map[level] = levels.includes(level) ? level : null;
+  }
+  return map;
+}
+
+// 合并：目录条目 + provider 定义 + 排除表 + 元数据 -> pi 的模型定义数组。
+// 保持目录里的先后次序；目录为空时返回空数组。contextWindow 以端点为准，元数据只补 cost、
+// 推理档位与 reasoning；没有元数据时用占位值。
 export function composeModels(
   declaration: ProviderDeclaration,
   entries: readonly CatalogEntry[],
   excludedIds: readonly string[],
+  metadata?: ReadonlyMap<string, MetadataEntry>,
 ): ProviderModelConfig[] {
   const excluded = new Set(excludedIds);
   return entries
     .filter((entry) => entry.endpoints.includes(CHAT_COMPLETIONS_PATH) && !excluded.has(entry.id))
-    .map((entry) => ({
-      id: entry.id,
-      name: entry.name,
-      api: declaration.api,
-      baseUrl: declaration.baseUrl,
-      reasoning: false,
-      input: ['text'],
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      contextWindow: entry.contextWindow,
-      maxTokens: DEFAULT_MAX_TOKENS,
-      compat: declaration.compat,
-    }));
+    .map((entry) => {
+      const meta = metadata?.get(entry.id);
+      const thinkingLevel = meta?.thinkingLevel ?? [];
+      const metaCost = meta?.cost;
+      return {
+        id: entry.id,
+        name: entry.name,
+        api: declaration.api,
+        baseUrl: declaration.baseUrl,
+        reasoning: thinkingLevel.length > 0,
+        thinkingLevelMap: toThinkingLevelMap(thinkingLevel),
+        input: ['text'],
+        cost: metaCost
+          ? {
+              input: metaCost.input,
+              output: metaCost.output,
+              cacheRead: metaCost.cacheRead,
+              cacheWrite: metaCost.cacheWrite ?? 0,
+            }
+          : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: entry.contextWindow,
+        maxTokens: DEFAULT_MAX_TOKENS,
+        compat: declaration.compat,
+      };
+    });
 }
 
 // 把合并结果注册给 provider。提供 models 时 pi 是替换语义：该 provider 的模型列表以这一份为准。
