@@ -72,7 +72,7 @@ export function composeModels(
         ...meta,
       } as ProviderModelConfig & { thinkingLevel?: string[] };
       delete model.thinkingLevel;
-      if (meta?.cost && meta.thinkingLevel !== undefined) {
+      if (meta?.cost) {
         model.cost = {
           input: meta.cost.input,
           output: meta.cost.output,

@@ -16,12 +16,47 @@ import type {
 const KNOWN_CATALOG_KINDS = ['http-model-list'];
 const KNOWN_ENVELOPES = ['openai-data-array'];
 const KNOWN_AUTH_HEADERS = ['bearer'];
+const KNOWN_PROVIDER_KEYS = new Set([
+  'source',
+  'name',
+  'baseUrl',
+  'api',
+  'compat',
+  'catalog',
+  'metadata',
+  'extras',
+  'exclusions',
+]);
+const KNOWN_CATALOG_KEYS = new Set([
+  'kind',
+  'url',
+  'requestHeaders',
+  'authHeader',
+  'envelope',
+  'fields',
+]);
 const KNOWN_FIELD_NAMES = new Set(['id', 'name', 'contextWindow', 'endpoints']);
 const KNOWN_METADATA_KINDS = ['npm-package-doc', 'pi-model-list'];
+const KNOWN_NPM_METADATA_KEYS = new Set([
+  'kind',
+  'package',
+  'file',
+  'versionUrl',
+  'fileUrl',
+  'format',
+  'columns',
+  'valueParsers',
+]);
+const KNOWN_PI_MODEL_LIST_METADATA_KEYS = new Set(['kind']);
 const KNOWN_METADATA_FORMATS = ['markdown-table'];
 const KNOWN_VALUE_PARSERS = ['size-suffix', 'comma-list', 'price-slash-cache'];
 const KNOWN_METADATA_COLUMNS = new Set(['id', 'name', 'contextWindow', 'thinkingLevel', 'cost']);
 const KNOWN_PARSER_FIELDS = new Set(['contextWindow', 'thinkingLevel', 'cost']);
+const PARSER_BY_FIELD: Record<keyof MetadataValueParsers, ValueParserName> = {
+  contextWindow: 'size-suffix',
+  thinkingLevel: 'comma-list',
+  cost: 'price-slash-cache',
+};
 
 function fail(message: string): never {
   throw new Error(message);
@@ -32,6 +67,18 @@ function asObject(value: unknown, where: string): Record<string, unknown> {
     return fail(`${where} 必须是一个对象`);
   }
   return value as Record<string, unknown>;
+}
+
+function rejectUnknownKeys(
+  source: Record<string, unknown>,
+  knownKeys: ReadonlySet<string>,
+  where: string,
+): void {
+  for (const key of Object.keys(source)) {
+    if (!knownKeys.has(key)) {
+      fail(`${where} 有不认识的项 ${key}`);
+    }
+  }
 }
 
 function requiredString(source: Record<string, unknown>, key: string, where: string): string {
@@ -128,12 +175,16 @@ function parseValueParsers(value: unknown, where: string): MetadataValueParsers 
       return fail(`${parsersWhere} 有不认识的项 ${key}`);
     }
   }
-  function parserName(key: string): ValueParserName {
+  function parserName(key: keyof MetadataValueParsers): ValueParserName {
     const name = requiredString(own, key, parsersWhere);
     if (!KNOWN_VALUE_PARSERS.includes(name)) {
       return fail(
         `${parsersWhere}.${key} 不认识 ${name}（已知：${KNOWN_VALUE_PARSERS.join('、')}）`,
       );
+    }
+    const expected = PARSER_BY_FIELD[key];
+    if (name !== expected) {
+      return fail(`${parsersWhere}.${key} 只能使用 ${expected}，不能使用 ${name}`);
     }
     return name as ValueParserName;
   }
@@ -152,7 +203,11 @@ function parseMetadata(value: unknown, providerId: string): MetadataDeclaration 
   if (!KNOWN_METADATA_KINDS.includes(kind)) {
     return fail(`${where}.kind 不认识 ${kind}（已知：${KNOWN_METADATA_KINDS.join('、')}）`);
   }
-  if (kind === 'pi-model-list') return { kind };
+  if (kind === 'pi-model-list') {
+    rejectUnknownKeys(own, KNOWN_PI_MODEL_LIST_METADATA_KEYS, where);
+    return { kind };
+  }
+  rejectUnknownKeys(own, KNOWN_NPM_METADATA_KEYS, where);
   const format = requiredString(own, 'format', where);
   if (!KNOWN_METADATA_FORMATS.includes(format)) {
     return fail(`${where}.format 不认识 ${format}（已知：${KNOWN_METADATA_FORMATS.join('、')}）`);
@@ -188,6 +243,7 @@ function parseFields(value: unknown, where: string): CatalogFields {
 function parseCatalog(value: unknown, providerId: string): CatalogDeclaration {
   const where = `providers.json 里 provider ${providerId} 的 catalog`;
   const own = asObject(value, where);
+  rejectUnknownKeys(own, KNOWN_CATALOG_KEYS, where);
   const kind = requiredString(own, 'kind', where);
   if (!KNOWN_CATALOG_KINDS.includes(kind)) {
     return fail(`${where}.kind 不认识 ${kind}（已知：${KNOWN_CATALOG_KINDS.join('、')}）`);
@@ -217,7 +273,10 @@ export function parseProvidersConfig(raw: unknown): Map<string, ProviderDeclarat
   const root = asObject(raw, 'providers.json 的顶层');
   const declared = new Map<string, Record<string, unknown>>();
   for (const [providerId, value] of Object.entries(root)) {
-    declared.set(providerId, asObject(value, `providers.json 里 provider ${providerId}`));
+    const where = `providers.json 里 provider ${providerId}`;
+    const own = asObject(value, where);
+    rejectUnknownKeys(own, KNOWN_PROVIDER_KEYS, where);
+    declared.set(providerId, own);
   }
 
   const resolved = new Map<string, ProviderDeclaration>();
