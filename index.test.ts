@@ -266,6 +266,20 @@ describe('parseProvidersConfig', () => {
     );
   });
 
+  it('provider 根对象有不认识的项时抛出并带 provider 名与键名', () => {
+    expect(() => parseProvidersConfig(configObject({ exclusion: 'model-exclude.json' }))).toThrow(
+      'providers.json 里 provider commandcode 有不认识的项 exclusion',
+    );
+  });
+
+  it('catalog 有不认识的项时抛出', () => {
+    expect(() =>
+      parseProvidersConfig(configObject({}, { requestHeader: { accept: 'application/json' } })),
+    ).toThrow(
+      'providers.json 里 provider commandcode 的 catalog 有不认识的项 requestHeader',
+    );
+  });
+
   it('fields 有不认识的项时抛出', () => {
     expect(() =>
       parseProvidersConfig(
@@ -340,6 +354,28 @@ describe('parseProvidersConfig', () => {
     );
   });
 
+  it('metadata 有不认识的项时抛出', () => {
+    const config = configObject();
+    (config.commandcode as Record<string, unknown>).metadata = {
+      ...METADATA_OBJECT,
+      packageName: 'command-code',
+    };
+    expect(() => parseProvidersConfig(config)).toThrow(
+      'providers.json 里 provider commandcode 的 metadata 有不认识的项 packageName',
+    );
+  });
+
+  it('pi-model-list metadata 有额外项时抛出', () => {
+    const config = configObject();
+    (config.commandcode as Record<string, unknown>).metadata = {
+      kind: 'pi-model-list',
+      format: 'markdown-table',
+    };
+    expect(() => parseProvidersConfig(config)).toThrow(
+      'providers.json 里 provider commandcode 的 metadata 有不认识的项 format',
+    );
+  });
+
   it('metadata.format 不认识时抛出', () => {
     const config = configObject();
     (config.commandcode as Record<string, unknown>).metadata = {
@@ -349,6 +385,25 @@ describe('parseProvidersConfig', () => {
     expect(() => parseProvidersConfig(config)).toThrow(
       'providers.json 里 provider commandcode 的 metadata.format 不认识 csv-table（已知：markdown-table）',
     );
+  });
+
+  it('metadata.valueParsers 的字段必须使用对应解析器', () => {
+    const config = configObject();
+    (config.commandcode as Record<string, unknown>).metadata = {
+      ...METADATA_OBJECT,
+      valueParsers: { ...METADATA_OBJECT.valueParsers, contextWindow: 'comma-list' },
+    };
+    expect(() => parseProvidersConfig(config)).toThrow(
+      'providers.json 里 provider commandcode 的 metadata 的 valueParsers.contextWindow 只能使用 size-suffix，不能使用 comma-list',
+    );
+
+    const valid = configObject();
+    (valid.commandcode as Record<string, unknown>).metadata = METADATA_OBJECT;
+    expect(
+      parseProvidersConfig(valid).get('commandcode')?.metadata?.kind === 'npm-package-doc'
+        ? parseProvidersConfig(valid).get('commandcode')?.metadata.valueParsers.contextWindow
+        : undefined,
+    ).toBe('size-suffix');
   });
 
   it('metadata.valueParsers 的解析器不认识时抛出', () => {
@@ -891,6 +946,21 @@ describe('composeModels', () => {
         xhigh: null,
         max: 'max',
       },
+    });
+  });
+
+  it('metadata 只给 cost 时仍按 pi 的形状补上 cacheWrite', () => {
+    const metadata = new Map<string, MetadataEntry>([
+      [
+        'gpt-5.6-sol',
+        { cost: { input: 0.1, output: 0.2, cacheRead: 0.01 } },
+      ],
+    ]);
+    expect(composeModels(commandcode(), entries, [], metadata).models[0].cost).toEqual({
+      input: 0.1,
+      output: 0.2,
+      cacheRead: 0.01,
+      cacheWrite: 0,
     });
   });
 
