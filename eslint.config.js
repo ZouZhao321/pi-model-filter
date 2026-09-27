@@ -34,6 +34,6 @@ export default [
     },
   },
   {
-    ignores: ['node_modules/**', '*.js', '.worktrees/**'],
+    ignores: ['node_modules/**', '*.js', '.worktrees/**', '**/.backups/**'],
   },
 ];
