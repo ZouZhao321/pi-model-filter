@@ -86,6 +86,13 @@ export interface MetadataCache {
   entries: Map<string, MetadataEntry>;
 }
 
+/** 参数补充表里一个模型 id 的补充字段。maxTokens 与 input 是补齐字段，其余字段按显式覆盖处理。 */
+export interface ModelExtra {
+  maxTokens?: number;
+  input?: ('text' | 'image')[];
+  [key: string]: unknown;
+}
+
 /** 一份校验过的 provider 定义。source 引用在解析时已经换成被引用方的声明，只有 name 可以按 provider 覆盖。 */
 export interface ProviderDeclaration {
   /** 声明目录来源的 provider 名：凭据与目录缓存都按它取 */
