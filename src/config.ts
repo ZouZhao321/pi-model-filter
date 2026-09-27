@@ -8,12 +8,14 @@ import type {
   MetadataCache,
   MetadataCost,
   MetadataEntry,
+  ModelExtra,
   ProviderDeclaration,
 } from './types.ts';
 
 export const PROVIDER_ID = 'opencode-go';
 export const DATA_DIR = join(homedir(), '.pi', 'agent', 'model-filter');
 const EXCLUDE_FILE = 'model-exclude.json';
+const EXTRAS_FILE = 'model-extras.json';
 const AVAILABLE_PATH = join(DATA_DIR, 'available-models.json');
 export const PROVIDERS_PATH = join(DATA_DIR, 'providers.json');
 export const LOG_PATH = join(DATA_DIR, 'requests.log');
@@ -66,6 +68,67 @@ export function loadExcludes(fileName: string = EXCLUDE_FILE): Map<string, strin
 export function loadProviders(): Map<string, ProviderDeclaration> {
   if (!existsSync(PROVIDERS_PATH)) return new Map();
   return parseProvidersConfig(readJsonFile(PROVIDERS_PATH));
+}
+
+// 把一个模型 id 的补充字段对象转成 ModelExtra。maxTokens 必须是数字、input 必须是字符串数组，
+// 其余字段按显式覆盖原样保留，不做类型校验。
+function toModelExtra(
+  fields: Record<string, unknown>,
+  path: string,
+  providerId: string,
+  modelId: string,
+): ModelExtra {
+  const extra: ModelExtra = {};
+  for (const [key, value] of Object.entries(fields)) {
+    extra[key] = value;
+  }
+  if (
+    extra.maxTokens !== undefined &&
+    (typeof extra.maxTokens !== 'number' || !Number.isFinite(extra.maxTokens))
+  ) {
+    throw new Error(`${path} 里 provider ${providerId} 的模型 ${modelId} 的 maxTokens 必须是数字`);
+  }
+  if (
+    extra.input !== undefined &&
+    (!Array.isArray(extra.input) || !extra.input.every((item) => typeof item === 'string'))
+  ) {
+    throw new Error(
+      `${path} 里 provider ${providerId} 的模型 ${modelId} 的 input 必须是字符串数组`,
+    );
+  }
+  return extra;
+}
+
+// 参数补充表格式：provider 名 -> 模型 id -> 补充字段对象。文件不存在时视为空表。
+// dataDir 只在测试里覆盖，用于隔离读写位置；默认仍是插件数据目录。
+export function loadModelExtras(
+  fileName: string = EXTRAS_FILE,
+  dataDir: string = DATA_DIR,
+): Map<string, Map<string, ModelExtra>> {
+  const path = join(dataDir, fileName);
+  const extras = new Map<string, Map<string, ModelExtra>>();
+  if (!existsSync(path)) return extras;
+  const parsed = readJsonFile(path);
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`${path} 的顶层必须是一个对象：provider 名 -> 模型 id -> 补充字段`);
+  }
+  for (const [providerId, models] of Object.entries(parsed as Record<string, unknown>)) {
+    if (models === null || typeof models !== 'object' || Array.isArray(models)) {
+      throw new Error(`${path} 里 provider ${providerId} 的值必须是对象`);
+    }
+    const byId = new Map<string, ModelExtra>();
+    for (const [modelId, fields] of Object.entries(models as Record<string, unknown>)) {
+      if (fields === null || typeof fields !== 'object' || Array.isArray(fields)) {
+        throw new Error(`${path} 里 provider ${providerId} 的模型 ${modelId} 的值必须是对象`);
+      }
+      byId.set(
+        modelId,
+        toModelExtra(fields as Record<string, unknown>, path, providerId, modelId),
+      );
+    }
+    extras.set(providerId, byId);
+  }
+  return extras;
 }
 
 interface AvailableModelsFile {

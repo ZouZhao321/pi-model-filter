@@ -36,6 +36,7 @@ import {
   loadCatalogCache,
   loadExcludes,
   loadMetadataCache,
+  loadModelExtras,
   loadProviders,
   PROVIDER_ID,
   REQUEST_TIMEOUT_MS,
@@ -52,6 +53,7 @@ import type {
   MetadataCache,
   MetadataEntry,
   MetadataSourceFactory,
+  ModelExtra,
   ProviderDeclaration,
   SourceFactory,
 } from './src/types.ts';
@@ -172,6 +174,7 @@ export async function refreshCatalog(
   providers: readonly ProviderRef[],
   declaration: ProviderDeclaration,
   excludedIds: readonly string[],
+  extras: ReadonlyMap<string, ModelExtra> | undefined,
   session: SessionState,
   sourceFactory: CatalogSourceFactory = createHttpModelListSource,
   effects: RefreshEffects = DEFAULT_EFFECTS,
@@ -198,13 +201,9 @@ export async function refreshCatalog(
         )
       : undefined;
 
+    const composed = composeModels(declaration, entries, excludedIds, metadataEntries, extras);
     const registered = !session.ended;
-    if (registered)
-      registerCatalog(
-        pi,
-        providers,
-        composeModels(declaration, entries, excludedIds, metadataEntries),
-      );
+    if (registered) registerCatalog(pi, providers, composed.models);
     effects.appendLog({
       at: new Date().toISOString(),
       provider: sourceProviderId,
@@ -214,6 +213,7 @@ export async function refreshCatalog(
       attempts,
       idCount: entries.length,
       registered,
+      pendingExtras: composed.pendingExtras,
     });
   } catch (error) {
     effects.appendLog({
@@ -290,6 +290,9 @@ export default function (pi: ExtensionAPI) {
       const catalogExcludedIds = declaration.exclusions
         ? (loadExcludes(declaration.exclusions).get(declaration.sourceProviderId) ?? [])
         : [];
+      const extras = declaration.extras
+        ? loadModelExtras(declaration.extras).get(declaration.sourceProviderId)
+        : undefined;
       const cached = loadCatalogCache(declaration.sourceProviderId);
       if (cached) {
         const metadataEntries = declaration.metadata
@@ -298,10 +301,10 @@ export default function (pi: ExtensionAPI) {
         registerCatalog(
           pi,
           providers,
-          composeModels(declaration, cached, catalogExcludedIds, metadataEntries),
+          composeModels(declaration, cached, catalogExcludedIds, metadataEntries, extras).models,
         );
       }
-      void refreshCatalog(pi, ctx, providers, declaration, catalogExcludedIds, session);
+      void refreshCatalog(pi, ctx, providers, declaration, catalogExcludedIds, extras, session);
     }
   });
 }

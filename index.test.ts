@@ -2,6 +2,8 @@
 // composeModels()、parseProvidersConfig()、createOpencodeGoSource()、createHttpModelListSource()、
 // refresh()、refreshCatalog() 与 fetchWithRetry() 的单元测试。
 import type { ExtensionAPI, ExtensionContext } from '@earendil-works/pi-coding-agent';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { refresh, refreshCatalog, type ProviderRef } from './index.ts';
 import {
@@ -13,6 +15,7 @@ import {
   toModelIds,
 } from './src/catalog.ts';
 import { composeModels, selectModels } from './src/compose.ts';
+import { loadModelExtras } from './src/config.ts';
 import {
   createNpmPackageDocSource,
   parseCommaList,
@@ -29,6 +32,7 @@ import type {
   MetadataCache,
   MetadataEntry,
   MetadataSourceFactory,
+  ModelExtra,
   ProviderDeclaration,
   SourceFactory,
 } from './src/types.ts';
@@ -858,7 +862,7 @@ describe('composeModels', () => {
   ];
 
   it('接口分组里没有 /chat/completions 的条目丢弃，并保持目录里的先后次序', () => {
-    expect(composeModels(commandcode(), entries, []).map((model) => model.id)).toEqual([
+    expect(composeModels(commandcode(), entries, []).models.map((model) => model.id)).toEqual([
       'gpt-5.6-sol',
       'deepseek/deepseek-v4-pro',
     ]);
@@ -866,7 +870,9 @@ describe('composeModels', () => {
 
   it('命中排除表的 id 不出现，前缀相同的其他 id 不受影响', () => {
     expect(
-      composeModels(commandcode(), entries, ['deepseek/deepseek-v4-pro']).map((model) => model.id),
+      composeModels(commandcode(), entries, ['deepseek/deepseek-v4-pro']).models.map(
+        (model) => model.id,
+      ),
     ).toEqual(['gpt-5.6-sol']);
     const prefixed: CatalogEntry[] = [
       { id: 'glm-5.1', name: 'GLM-5.1', contextWindow: 200000, endpoints: ['/chat/completions'] },
@@ -877,9 +883,9 @@ describe('composeModels', () => {
         endpoints: ['/chat/completions'],
       },
     ];
-    expect(composeModels(commandcode(), prefixed, ['glm-5.1']).map((model) => model.id)).toEqual([
-      'glm-5.1-flash',
-    ]);
+    expect(
+      composeModels(commandcode(), prefixed, ['glm-5.1']).models.map((model) => model.id),
+    ).toEqual(['glm-5.1-flash']);
   });
 
   it('排除表覆盖全部条目时结果为空', () => {
@@ -889,15 +895,15 @@ describe('composeModels', () => {
         entries,
         entries.map((entry) => entry.id),
       ),
-    ).toEqual([]);
+    ).toEqual({ models: [], pendingExtras: [] });
   });
 
   it('目录为空时返回空数组，不抛出', () => {
-    expect(composeModels(commandcode(), [], [])).toEqual([]);
+    expect(composeModels(commandcode(), [], [])).toEqual({ models: [], pendingExtras: [] });
   });
 
   it('字段按来源取值：目录给 id、name、contextWindow，provider 定义给 api、baseUrl、compat', () => {
-    expect(composeModels(commandcode(), entries, [])[0]).toEqual({
+    expect(composeModels(commandcode(), entries, []).models[0]).toEqual({
       id: 'gpt-5.6-sol',
       name: 'GPT-5.6 Sol',
       api: 'openai-completions',
@@ -931,7 +937,7 @@ describe('composeModels', () => {
         },
       ],
     ]);
-    const model = composeModels(commandcode(), entries, [], metadata).find(
+    const model = composeModels(commandcode(), entries, [], metadata).models.find(
       (item) => item.id === 'deepseek/deepseek-v4-pro',
     );
     expect(model).toMatchObject({
@@ -946,6 +952,119 @@ describe('composeModels', () => {
         xhigh: null,
         max: 'max',
       },
+    });
+  });
+
+  it('补充表命中时 maxTokens 与 input 取补充表的值', () => {
+    const extras = new Map<string, ModelExtra>([
+      ['gpt-5.6-sol', { maxTokens: 128000, input: ['text', 'image'] }],
+    ]);
+    const result = composeModels(commandcode(), entries, [], undefined, extras);
+    expect(result.models.find((item) => item.id === 'gpt-5.6-sol')).toMatchObject({
+      maxTokens: 128000,
+      input: ['text', 'image'],
+    });
+    expect(result.pendingExtras).toEqual(['deepseek/deepseek-v4-pro']);
+  });
+
+  it('补充表缺 id 或缺字段时用默认值，id 进入待补列表', () => {
+    const extras = new Map<string, ModelExtra>([
+      ['gpt-5.6-sol', { maxTokens: 128000 }],
+      ['deepseek/deepseek-v4-pro', { input: ['text'] }],
+    ]);
+    const result = composeModels(commandcode(), entries, [], undefined, extras);
+    expect(result.models.find((item) => item.id === 'gpt-5.6-sol')).toMatchObject({
+      maxTokens: 128000,
+      input: ['text'],
+    });
+    expect(result.models.find((item) => item.id === 'deepseek/deepseek-v4-pro')).toMatchObject({
+      maxTokens: 16384,
+      input: ['text'],
+    });
+    expect(result.pendingExtras).toEqual(['gpt-5.6-sol', 'deepseek/deepseek-v4-pro']);
+  });
+
+  it('补充表显式写 cost 或 contextWindow 时盖过自动来源', () => {
+    const metadata = new Map<string, MetadataEntry>([
+      [
+        'gpt-5.6-sol',
+        {
+          name: 'GPT-5.6 Sol',
+          contextWindow: 1050000,
+          thinkingLevel: ['high'],
+          cost: { input: 10, output: 20, cacheRead: 1 },
+        },
+      ],
+    ]);
+    const extras = new Map<string, ModelExtra>([
+      [
+        'gpt-5.6-sol',
+        { cost: { input: 0.1, output: 0.2, cacheRead: 0.01 }, contextWindow: 2000000 },
+      ],
+    ]);
+    const model = composeModels(commandcode(), entries, [], metadata, extras).models[0];
+    expect(model).toMatchObject({
+      cost: { input: 0.1, output: 0.2, cacheRead: 0.01 },
+      contextWindow: 2000000,
+    });
+  });
+
+  it('补充表没写 contextWindow 时端点胜出', () => {
+    const metadata = new Map<string, MetadataEntry>([
+      [
+        'gpt-5.6-sol',
+        { name: 'GPT-5.6 Sol', contextWindow: 999, thinkingLevel: [], cost: undefined },
+      ],
+    ]);
+    const extras = new Map<string, ModelExtra>([['gpt-5.6-sol', { maxTokens: 128000 }]]);
+    const model = composeModels(commandcode(), entries, [], metadata, extras).models[0];
+    expect(model.contextWindow).toBe(1050000);
+  });
+});
+
+describe('loadModelExtras', () => {
+  const testDir = join(process.cwd(), 'tmp', 'extras-test');
+
+  function writeExtras(fileName: string, content: string): void {
+    mkdirSync(testDir, { recursive: true });
+    writeFileSync(join(testDir, fileName), content, 'utf-8');
+  }
+
+  it('文件不存在时按空表处理', () => {
+    expect(loadModelExtras('missing.json', join(testDir, 'nope'))).toEqual(new Map());
+  });
+
+  it('不是合法 JSON 时抛出，错误带文件名', () => {
+    writeExtras('bad-json.json', '{ not json');
+    expect(() => loadModelExtras('bad-json.json', testDir)).toThrow('bad-json.json');
+  });
+
+  it('顶层不是对象时抛出', () => {
+    writeExtras('top-array.json', '[]');
+    expect(() => loadModelExtras('top-array.json', testDir)).toThrow('的顶层必须是一个对象');
+  });
+
+  it('maxTokens 不是数字时抛出，错误带文件名与位置', () => {
+    writeExtras('bad-max.json', JSON.stringify({ commandcode: { a: { maxTokens: 'x' } } }));
+    expect(() => loadModelExtras('bad-max.json', testDir)).toThrow('maxTokens 必须是数字');
+  });
+
+  it('input 不是字符串数组时抛出', () => {
+    writeExtras('bad-input.json', JSON.stringify({ commandcode: { a: { input: [1] } } }));
+    expect(() => loadModelExtras('bad-input.json', testDir)).toThrow('input 必须是字符串数组');
+  });
+
+  it('合法文件返回按 provider 与 id 组织的补充字段', () => {
+    writeExtras(
+      'ok.json',
+      JSON.stringify({
+        commandcode: { 'gpt-5.6-sol': { maxTokens: 128000, input: ['text', 'image'] } },
+      }),
+    );
+    const extras = loadModelExtras('ok.json', testDir);
+    expect(extras.get('commandcode')?.get('gpt-5.6-sol')).toEqual({
+      maxTokens: 128000,
+      input: ['text', 'image'],
     });
   });
 });
@@ -1019,6 +1138,7 @@ describe('refresh 与 refreshCatalog 的会话结束处理', () => {
       providers,
       providers[0].declaration,
       [],
+      undefined,
       { ended: false },
       catalogSource(entries),
       effects,
@@ -1047,6 +1167,7 @@ describe('refresh 与 refreshCatalog 的会话结束处理', () => {
       providers,
       providers[0].declaration,
       [],
+      undefined,
       { ended: true },
       catalogSource(entries),
       effects,
@@ -1097,6 +1218,7 @@ describe('refresh 与 refreshCatalog 的会话结束处理', () => {
       providers,
       providers[0].declaration,
       [],
+      undefined,
       { ended: false },
       failing,
       effects,
@@ -1171,6 +1293,7 @@ describe('refreshCatalog 的元数据处理', () => {
       providers,
       providers[0].declaration,
       [],
+      undefined,
       { ended: false },
       catalogSource,
       effects,

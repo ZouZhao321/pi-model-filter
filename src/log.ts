@@ -13,6 +13,8 @@ export interface RequestLogEntry {
   idCount?: number;
   /** 成功响应里是否真的走到了注册；会话在响应到达之前结束时为 false。失败响应不带这一项。 */
   registered?: boolean;
+  /** 走 maxTokens 或 input 默认值的模型 id 数组，只在成功响应里出现。 */
+  pendingExtras?: string[];
   error?: string;
 }
 

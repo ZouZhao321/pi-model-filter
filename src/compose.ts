@@ -7,10 +7,16 @@ import type {
   ProviderModelConfig,
 } from '@earendil-works/pi-coding-agent';
 import { PROVIDER_ID } from './config.ts';
-import type { CatalogEntry, MetadataEntry, ProviderDeclaration } from './types.ts';
+import type {
+  CatalogEntry,
+  MetadataEntry,
+  ModelExtra,
+  ProviderDeclaration,
+} from './types.ts';
 
 const CHAT_COMPLETIONS_PATH = '/chat/completions';
-// reasoning、cost、thinkingLevelMap 来自 npm 包的模型目录；maxTokens、input 暂时取固定值（T5 再补）。
+// reasoning、cost、thinkingLevelMap 来自 npm 包的模型目录；maxTokens、input 来自参数补充表，
+// 补充表没有的用默认值并记入待补列表。
 const DEFAULT_MAX_TOKENS = 16_384;
 const THINKING_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 
@@ -63,23 +69,32 @@ function toThinkingLevelMap(levels: readonly string[]): Record<string, string | 
   return map;
 }
 
-// 合并：目录条目 + provider 定义 + 排除表 + 元数据 -> pi 的模型定义数组。
-// 保持目录里的先后次序；目录为空时返回空数组。contextWindow 以端点为准，元数据只补 cost、
-// 推理档位与 reasoning；没有元数据时用占位值。
+// 合并：目录条目 + provider 定义 + 排除表 + 元数据 + 参数补充表 -> pi 的模型定义数组。
+// 保持目录里的先后次序；目录为空时返回空数组。自动取值顺序：contextWindow 以端点为准，
+// cost、推理档位与 reasoning 来自元数据；maxTokens 与 input 来自补充表，没有就用默认值并记入待补列表。
+// 补充表里显式写下的其余字段一律盖过任何自动来源（官方数据有误时的人工修正通道）。
+export interface ComposeResult {
+  models: ProviderModelConfig[];
+  /** 待补 id：maxTokens 或 input 用了默认值的模型 id，按目录先后次序排列。 */
+  pendingExtras: string[];
+}
+
 export function composeModels(
   declaration: ProviderDeclaration,
   entries: readonly CatalogEntry[],
   excludedIds: readonly string[],
   metadata?: ReadonlyMap<string, MetadataEntry>,
-): ProviderModelConfig[] {
+  extras?: ReadonlyMap<string, ModelExtra>,
+): ComposeResult {
   const excluded = new Set(excludedIds);
-  return entries
+  const pendingExtras: string[] = [];
+  const models = entries
     .filter((entry) => entry.endpoints.includes(CHAT_COMPLETIONS_PATH) && !excluded.has(entry.id))
     .map((entry) => {
       const meta = metadata?.get(entry.id);
       const thinkingLevel = meta?.thinkingLevel ?? [];
       const metaCost = meta?.cost;
-      return {
+      const model: ProviderModelConfig = {
         id: entry.id,
         name: entry.name,
         api: declaration.api,
@@ -99,7 +114,21 @@ export function composeModels(
         maxTokens: DEFAULT_MAX_TOKENS,
         compat: declaration.compat,
       };
+      const extra = extras?.get(entry.id);
+      if (typeof extra?.maxTokens !== 'number' || !Array.isArray(extra?.input)) {
+        pendingExtras.push(entry.id);
+      }
+      if (extra) {
+        if (typeof extra.maxTokens === 'number') model.maxTokens = extra.maxTokens;
+        if (Array.isArray(extra.input)) model.input = [...extra.input];
+        for (const [key, value] of Object.entries(extra)) {
+          if (key === 'maxTokens' || key === 'input') continue;
+          (model as unknown as Record<string, unknown>)[key] = value;
+        }
+      }
+      return model;
     });
+  return { models, pendingExtras };
 }
 
 // 把合并结果注册给 provider。提供 models 时 pi 是替换语义：该 provider 的模型列表以这一份为准。
