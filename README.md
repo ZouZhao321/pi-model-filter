@@ -26,7 +26,7 @@ pi install ./model-filter
 
 ## What it does
 
-The package declares a single extension entry (`./index.ts`) in its `pi` manifest. The extension registers no tools or commands; it works through the provider registry and two session events.
+The package declares a single extension entry (`./src/index.ts`) in its `pi` manifest. The extension registers no tools or commands; it works through the provider registry and two session events.
 
 - On `session_start`, reads the provider declarations from `providers.json`. For every declared provider it first registers the model list composed from the last catalog cache (when one exists), then refreshes that list in the background.
 - The refresh fetches the provider's model catalog over HTTP, merges it with model metadata (cost, reasoning levels, context window), removes the excluded ids, applies the extras overlay, and re-registers the provider.

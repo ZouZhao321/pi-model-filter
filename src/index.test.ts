@@ -4,9 +4,9 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { refreshCatalog, type ProviderRef } from './index.ts';
-import { createHttpModelListSource, parseCatalogEntries, toCatalogEntries } from './src/catalog.ts';
-import { composeModels } from './src/compose.ts';
-import { loadModelExtras } from './src/config.ts';
+import { createHttpModelListSource, parseCatalogEntries, toCatalogEntries } from './catalog.ts';
+import { composeModels } from './compose.ts';
+import { loadModelExtras } from './config.ts';
 import {
   createNpmPackageDocSource,
   readPiModelMetadata,
@@ -14,19 +14,20 @@ import {
   parseMetadataDocument,
   parsePriceSlashCache,
   parseSizeSuffix,
-} from './src/metadata.ts';
-import { parseProvidersConfig } from './src/providers.ts';
-import { fetchWithRetry, SourceError } from './src/retry.ts';
+} from './metadata.ts';
+import { parseProvidersConfig } from './providers.ts';
+import { fetchWithRetry, SourceError } from './retry.ts';
 import type {
   CatalogDeclaration,
   CatalogEntry,
   CatalogSourceFactory,
   MetadataCache,
+  MetadataDeclaration,
   MetadataEntry,
   MetadataSourceFactory,
   ModelExtra,
   ProviderDeclaration,
-} from './src/types.ts';
+} from './types.ts';
 
 describe('fetchWithRetry', () => {
   const signal = new AbortController().signal;
@@ -190,6 +191,17 @@ function commandcodeWithMetadata(): ProviderDeclaration {
   const declaration = parseProvidersConfig(config).get('commandcode');
   if (!declaration) throw new Error('测试配置里没有 commandcode');
   return declaration;
+}
+
+type NpmPackageDocMetadata = Extract<MetadataDeclaration, { kind: 'npm-package-doc' }>;
+
+/** 测试配置里的 commandcode 一定带 npm 包文档元数据；解析函数要的是收窄后的那一支。 */
+function npmMetadata(declaration: ProviderDeclaration): NpmPackageDocMetadata {
+  const metadata = declaration.metadata;
+  if (metadata?.kind !== 'npm-package-doc') {
+    throw new Error('测试配置里没有 npm-package-doc 元数据');
+  }
+  return metadata;
 }
 
 describe('parseProvidersConfig', () => {
@@ -393,10 +405,10 @@ describe('parseProvidersConfig', () => {
 
     const valid = configObject();
     (valid.commandcode as Record<string, unknown>).metadata = METADATA_OBJECT;
+    const parsed = parseProvidersConfig(valid).get('commandcode');
+    const metadata = parsed?.metadata;
     expect(
-      parseProvidersConfig(valid).get('commandcode')?.metadata?.kind === 'npm-package-doc'
-        ? parseProvidersConfig(valid).get('commandcode')?.metadata.valueParsers.contextWindow
-        : undefined,
+      metadata?.kind === 'npm-package-doc' ? metadata.valueParsers.contextWindow : undefined,
     ).toBe('size-suffix');
   });
 
@@ -724,7 +736,7 @@ describe('parseMetadataDocument', () => {
 
   it('跳过表头行与分隔行，把多张表解析成 Map', () => {
     const declaration = commandcodeWithMetadata();
-    const result = parseMetadataDocument(MARKDOWN, declaration.metadata!);
+    const result = parseMetadataDocument(MARKDOWN, npmMetadata(declaration));
     expect(result.size).toBe(3);
     expect(result.get('deepseek/deepseek-v4-pro')).toEqual({
       name: 'DeepSeek V4 Pro (latest)',
@@ -756,17 +768,17 @@ describe('parseMetadataDocument', () => {
     const swapped: ProviderDeclaration = {
       ...declaration,
       metadata: {
-        ...declaration.metadata!,
+        ...npmMetadata(declaration),
         columns: { id: 0, name: 2, contextWindow: 1, thinkingLevel: 3, cost: 4 },
       },
     };
-    expect(parseMetadataDocument(md, swapped.metadata!).get('x')).toMatchObject({
+    expect(parseMetadataDocument(md, npmMetadata(swapped)).get('x')).toMatchObject({
       name: '2M',
       contextWindow: 1000000,
       thinkingLevel: ['high'],
       cost: { input: 1, output: 2, cacheRead: 0.5 },
     });
-    expect(parseMetadataDocument(md, declaration.metadata!).get('x')).toMatchObject({
+    expect(parseMetadataDocument(md, npmMetadata(declaration)).get('x')).toMatchObject({
       name: '1M',
       contextWindow: 2000000,
     });
@@ -1023,7 +1035,7 @@ describe('composeModels', () => {
         metadata: { kind: 'pi-model-list' },
       },
     }).get('opencode-go')!;
-    const piModels = [
+    const piModels: (MetadataEntry & { id: string })[] = [
       {
         id: 'a',
         name: 'A',

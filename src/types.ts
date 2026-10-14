@@ -64,7 +64,9 @@ export interface MetadataCost {
   cacheWrite?: number;
 }
 
-export type MetadataEntry = Partial<ProviderModelConfig> & {
+export type MetadataEntry = Omit<Partial<ProviderModelConfig>, 'cost'> & {
+  /** 元数据里的 cost 允许省略 cacheWrite，合并时补 0。 */
+  cost?: MetadataCost;
   /** npm 文档使用的中间字段；合并时转换成 reasoning 与 thinkingLevelMap。 */
   thinkingLevel?: string[];
   [key: string]: unknown;

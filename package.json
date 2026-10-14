@@ -22,7 +22,6 @@
     "url": "https://github.com/ZouZhao321/pi-model-filter/issues"
   },
   "files": [
-    "index.ts",
     "src",
     "README.md",
     "CHANGELOG.md",
@@ -30,7 +29,7 @@
   ],
   "pi": {
     "extensions": [
-      "./index.ts"
+      "./src/index.ts"
     ]
   },
   "engines": {

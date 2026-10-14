@@ -25,8 +25,8 @@ import type {
   ExtensionContext,
   ProviderModelConfig,
 } from '@earendil-works/pi-coding-agent';
-import { createHttpModelListSource } from './src/catalog.ts';
-import { composeModels, registerCatalogModels } from './src/compose.ts';
+import { createHttpModelListSource } from './catalog.ts';
+import { composeModels, registerCatalogModels } from './compose.ts';
 import {
   loadCatalogCache,
   loadExcludes,
@@ -36,10 +36,10 @@ import {
   REQUEST_TIMEOUT_MS,
   saveCatalogCache,
   saveMetadataCache,
-} from './src/config.ts';
-import { appendLog, type RequestLogEntry } from './src/log.ts';
-import { createNpmPackageDocSource, readPiModelMetadata } from './src/metadata.ts';
-import { SourceError } from './src/retry.ts';
+} from './config.ts';
+import { appendLog, type RequestLogEntry } from './log.ts';
+import { createNpmPackageDocSource, readPiModelMetadata } from './metadata.ts';
+import { SourceError } from './retry.ts';
 import type {
   CatalogEntry,
   CatalogSourceFactory,
@@ -48,7 +48,7 @@ import type {
   MetadataSourceFactory,
   ModelExtra,
   ProviderDeclaration,
-} from './src/types.ts';
+} from './types.ts';
 
 /** 会话状态：目录请求在后台进行，可能在会话结束之后才回来。 */
 export interface SessionState {
