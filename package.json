@@ -39,6 +39,7 @@
     "lint:fix": "eslint . --ext .ts --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "check:pack": "node scripts/check-pack.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "prepare": "husky"
