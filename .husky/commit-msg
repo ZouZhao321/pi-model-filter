@@ -1,0 +1,3 @@
+# husky 接管了 core.hooksPath(.husky/_)，pre-commit 的 install 会因该配置拒绝写 .git/hooks，
+# 所以由 husky 转发到 .pre-commit-config.yaml 里的 commit-msg 阶段，钩子定义只保留一份。
+pre-commit run --hook-stage commit-msg --commit-msg-filename "$1"
