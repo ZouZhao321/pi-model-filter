@@ -1,3 +1,4 @@
 .worktrees/
 node_modules/
 dist/
+CODE_OF_CONDUCT.md
