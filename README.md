@@ -6,6 +6,14 @@ A pi extension that rebuilds a provider's model list at session start from a dec
 
 ## Install
 
+Install from npm (recommended):
+
+```bash
+pi install npm:pi-model-filter
+```
+
+Alternatively, install straight from the repository:
+
 ```bash
 pi install git:github.com/ZouZhao321/pi-model-filter
 ```
