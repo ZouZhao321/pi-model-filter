@@ -3,16 +3,36 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "按 model-exclude.json 的排除清单从会话模型列表剔除指定模型",
+  "description": "pi extension that rebuilds a provider's model list from a declared catalog and drops excluded models by id",
   "keywords": [
     "pi-package",
+    "pi-extension",
     "model",
     "filter"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ZouZhao321/pi-model-filter.git"
+  },
+  "homepage": "https://github.com/ZouZhao321/pi-model-filter#readme",
+  "bugs": {
+    "url": "https://github.com/ZouZhao321/pi-model-filter/issues"
+  },
+  "files": [
+    "index.ts",
+    "src",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
   ],
   "pi": {
     "extensions": [
       "./index.ts"
     ]
+  },
+  "engines": {
+    "node": ">=22"
   },
   "scripts": {
     "lint": "eslint . --ext .ts",
@@ -27,7 +47,7 @@
     "@earendil-works/pi-coding-agent": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "latest",
+    "@earendil-works/pi-coding-agent": "^0.84.2",
     "@types/node": "^22.0.0",
     "@typescript-eslint/eslint-plugin": "^8.0.0",
     "@typescript-eslint/parser": "^8.0.0",
