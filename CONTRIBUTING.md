@@ -1,52 +1,58 @@
-# 贡献指南
+# Contributing
 
-感谢你对本项目的关注！以下是参与贡献的流程。
+## Development workflow
 
-## 开发流程
+1. Create a topic branch: `git checkout -b feat/your-change`
+2. Commit with the message format described below
+3. Push the branch and open a pull request
 
-1. Fork 本仓库
-2. 创建特性分支：`git checkout -b feat/你的功能名`
-3. 提交代码：遵循 [Conventional Commits](#commit-规范) 规范
-4. 推送分支：`git push origin feat/你的功能名`
-5. 创建 Pull Request
+## Commit messages
 
-## Commit 规范
+Subject format: `type(scope): 中文描述`. The description is written in Chinese; the scope is optional.
 
-使用 [Conventional Commits](https://www.conventionalcommits.org/) 格式：
+| Type     | Meaning                         |
+| -------- | ------------------------------- |
+| feat     | New feature                     |
+| fix      | Bug fix                         |
+| refactor | Refactoring, no behavior change |
+| test     | Tests                           |
+| docs     | Documentation                   |
+| chore    | Maintenance                     |
+| perf     | Performance                     |
 
-```
-<type>(<scope>): <description>
+The description must contain Chinese characters. `scripts/check-commit-msg.py` enforces both the format and the type list; subjects starting with `Merge `, `Revert `, `fixup! `, `squash! ` or `amend! ` are passed through untouched.
 
-[optional body]
-```
-
-### Type 类型
-
-| Type     | 说明     |
-| -------- | -------- |
-| feat     | 新功能   |
-| fix      | Bug 修复 |
-| refactor | 重构     |
-| test     | 测试相关 |
-| docs     | 文档变更 |
-| chore    | 杂项     |
-| perf     | 性能优化 |
-
-### 示例
+This repository uses husky instead of a plain `pre-commit install`: `npm install` runs the `prepare` script, which installs the hooks, and `.husky/commit-msg` forwards to `pre-commit run --hook-stage commit-msg --commit-msg-filename "$1"`. `pre-commit` itself has to be on `PATH`:
 
 ```bash
-feat(auth): 新增登录功能
-fix(api): 修复分页查询问题
-docs: 更新 README
+python -m pip install --user pre-commit   # skip if pre-commit is already installed
 ```
 
-## PR 要求
+## Before you push
 
-- 标题描述清晰
-- 关联相关 Issue（如有）
-- 自测通过
-- 一次 PR 只做一件事
+```bash
+npm ci
+npm run typecheck     # tsc --noEmit
+npm run lint          # eslint . --ext .ts
+npm test              # vitest run
+npm run format:check  # prettier --check .
+npm run check:pack    # assert the npm tarball contents
+```
 
-## 问题反馈
+`npm test` runs the vitest suite in `src/index.test.ts`. `npm run check:pack` runs `npm pack --dry-run --json` and asserts that the entry declared in `pi.extensions`, `package.json`, `README.md`, `README.zh.md`, `LICENSE` and `CHANGELOG.md` are inside the tarball, and that `node_modules/`, `.github/`, `.husky/`, `tmp/`, `.worktrees/`, `docs/adr/`, `CONTEXT.md`, `HANDOFF.md` and `SPEC.md` are not.
 
-使用 [Issue Tracker](../../issues) 提交问题或建议。
+## Continuous integration
+
+`.github/workflows/ci.yml` runs the same six commands on `ubuntu-latest` with Node 22 and 24 and on `windows-latest` with Node 22, plus a `commit-msg` job that validates the subjects of the pushed commits (it is skipped for dependabot). `.github/workflows/gitleaks.yml` scans the repository and the pushed commits for secrets. Pushing a `v*` tag triggers `.github/workflows/publish.yml`, which runs `prepublishOnly` and publishes to npm with provenance.
+
+## Pull requests
+
+- One logical change per pull request
+- Fill in every section of the pull request template
+- State what changed and how you verified it
+
+## Issues and security reports
+
+Use the [issue tracker](/issues) for bugs and feature requests. Report security problems through the repository's Security tab; see [SECURITY.md](./SECURITY.md).
+
+By contributing you agree that your changes are released under the MIT license, see [LICENSE](./LICENSE).
