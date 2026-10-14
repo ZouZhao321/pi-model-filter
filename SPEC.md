@@ -132,13 +132,13 @@ pi 里的非内置 provider（当前是 `commandcode` 与 `commandcode-2`）需�
 
 自动字段来源如下：
 
-| pi 字段 | `commandcode` 来源 |
-| --- | --- |
-| `id`、`name` | 供应商目录 |
-| `api`、`baseUrl`、`compat` | provider 声明 |
-| `contextWindow` | 供应商目录；目录缺失时可采用元数据 |
-| `cost`、推理档位、`reasoning` | npm 包元数据 |
-| `maxTokens`、`input` | 参数补充表；缺失时采用默认值 |
+| pi 字段                       | `commandcode` 来源                 |
+| ----------------------------- | ---------------------------------- |
+| `id`、`name`                  | 供应商目录                         |
+| `api`、`baseUrl`、`compat`    | provider 声明                      |
+| `contextWindow`               | 供应商目录；目录缺失时可采用元数据 |
+| `cost`、推理档位、`reasoning` | npm 包元数据                       |
+| `maxTokens`、`input`          | 参数补充表；缺失时采用默认值       |
 
 合并时先构造 provider 默认字段，再应用元数据；目录提供的 `name` 与 `contextWindow` 覆盖元数据对应字段；最后应用参数补充表中的显式字段。参数补充表的显式字段拥有最高优先级。
 

@@ -1,11 +1,6 @@
 // 目录、元数据、参数补充表与排除表的合并和注册。
 import type { ExtensionAPI, ProviderModelConfig } from '@earendil-works/pi-coding-agent';
-import type {
-  CatalogEntry,
-  MetadataEntry,
-  ModelExtra,
-  ProviderDeclaration,
-} from './types.ts';
+import type { CatalogEntry, MetadataEntry, ModelExtra, ProviderDeclaration } from './types.ts';
 
 const CHAT_COMPLETIONS_PATH = '/chat/completions';
 // reasoning、cost、thinkingLevelMap 来自 npm 包的模型目录；maxTokens、input 来自参数补充表，
