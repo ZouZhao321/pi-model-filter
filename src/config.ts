@@ -119,10 +119,7 @@ export function loadModelExtras(
       if (fields === null || typeof fields !== 'object' || Array.isArray(fields)) {
         throw new Error(`${path} 里 provider ${providerId} 的模型 ${modelId} 的值必须是对象`);
       }
-      byId.set(
-        modelId,
-        toModelExtra(fields as Record<string, unknown>, path, providerId, modelId),
-      );
+      byId.set(modelId, toModelExtra(fields as Record<string, unknown>, path, providerId, modelId));
     }
     extras.set(providerId, byId);
   }

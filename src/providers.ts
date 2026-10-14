@@ -126,7 +126,9 @@ function parseRequestHeaders(value: unknown, where: string): Record<string, Requ
     }
     const generator = asObject(item, `${where} 的 requestHeaders.${key}`).generator;
     if (generator !== 'uuid') {
-      return fail(`${where} 的 requestHeaders.${key}.generator 不认识 ${String(generator)}（已知：uuid）`);
+      return fail(
+        `${where} 的 requestHeaders.${key}.generator 不认识 ${String(generator)}（已知：uuid）`,
+      );
     }
     headers[key] = { generator: 'uuid' };
   }

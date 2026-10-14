@@ -4,11 +4,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { refreshCatalog, type ProviderRef } from './index.ts';
-import {
-  createHttpModelListSource,
-  parseCatalogEntries,
-  toCatalogEntries,
-} from './src/catalog.ts';
+import { createHttpModelListSource, parseCatalogEntries, toCatalogEntries } from './src/catalog.ts';
 import { composeModels } from './src/compose.ts';
 import { loadModelExtras } from './src/config.ts';
 import {
@@ -275,9 +271,7 @@ describe('parseProvidersConfig', () => {
   it('catalog 有不认识的项时抛出', () => {
     expect(() =>
       parseProvidersConfig(configObject({}, { requestHeader: { accept: 'application/json' } })),
-    ).toThrow(
-      'providers.json 里 provider commandcode 的 catalog 有不认识的项 requestHeader',
-    );
+    ).toThrow('providers.json 里 provider commandcode 的 catalog 有不认识的项 requestHeader');
   });
 
   it('fields 有不认识的项时抛出', () => {
@@ -951,10 +945,7 @@ describe('composeModels', () => {
 
   it('metadata 只给 cost 时仍按 pi 的形状补上 cacheWrite', () => {
     const metadata = new Map<string, MetadataEntry>([
-      [
-        'gpt-5.6-sol',
-        { cost: { input: 0.1, output: 0.2, cacheRead: 0.01 } },
-      ],
+      ['gpt-5.6-sol', { cost: { input: 0.1, output: 0.2, cacheRead: 0.01 } }],
     ]);
     expect(composeModels(commandcode(), entries, [], metadata).models[0].cost).toEqual({
       input: 0.1,

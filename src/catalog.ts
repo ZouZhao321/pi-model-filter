@@ -2,7 +2,12 @@
 import { randomUUID } from 'node:crypto';
 import type { ExtensionContext } from '@earendil-works/pi-coding-agent';
 import { ABORT_MESSAGE, cancelBody, fetchWithRetry, SourceError } from './retry.ts';
-import type { CatalogDeclaration, CatalogEntry, CatalogSource, ProviderDeclaration } from './types.ts';
+import type {
+  CatalogDeclaration,
+  CatalogEntry,
+  CatalogSource,
+  ProviderDeclaration,
+} from './types.ts';
 
 // 按来源声明给的字段映射解析目录条目。条目缺 id、名称、上下文长度或接口分组时跳过，
 // 同一个 id 只留一次。响应不符合声明的封装形态（{ data: [...] }）时抛出。
@@ -96,17 +101,14 @@ export function createHttpModelListSource(
       if (catalog.authHeader === 'bearer' && !key) {
         throw new SourceError('没有可用的凭据', 0);
       }
-      const { response, attempts } = await fetchWithRetry(
-        (requestSignal) => {
-          const headers: Record<string, string> = {};
-          for (const [name, value] of Object.entries(catalog.requestHeaders)) {
-            headers[name] = typeof value === 'string' ? value : randomUUID();
-          }
-          if (key) headers.authorization = `Bearer ${key}`;
-          return fetch(url, { headers, signal: requestSignal });
-        },
-        signal,
-      );
+      const { response, attempts } = await fetchWithRetry((requestSignal) => {
+        const headers: Record<string, string> = {};
+        for (const [name, value] of Object.entries(catalog.requestHeaders)) {
+          headers[name] = typeof value === 'string' ? value : randomUUID();
+        }
+        if (key) headers.authorization = `Bearer ${key}`;
+        return fetch(url, { headers, signal: requestSignal });
+      }, signal);
       if (!response.ok) {
         await cancelBody(response);
         throw new SourceError(`接口返回 HTTP ${response.status}`, attempts, response.status);
