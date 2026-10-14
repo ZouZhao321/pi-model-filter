@@ -1,6 +1,5 @@
 {
   "name": "pi-model-filter",
-  "private": true,
   "version": "0.1.0",
   "type": "module",
   "description": "pi extension that rebuilds a provider's model list from a declared catalog and drops excluded models by id",
@@ -11,6 +10,9 @@
     "filter"
   ],
   "license": "MIT",
+  "publishConfig": {
+    "registry": "https://registry.npmjs.org/"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ZouZhao321/pi-model-filter.git"
@@ -42,7 +44,8 @@
     "check:pack": "node scripts/check-pack.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "prepare": "husky"
+    "prepare": "husky",
+    "prepublishOnly": "npm run typecheck && npm run lint && npm test && npm run format:check && npm run check:pack"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*"
