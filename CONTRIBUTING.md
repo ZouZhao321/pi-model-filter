@@ -20,13 +20,9 @@ Subject format: `type(scope): 中文描述`. The description is written in Chine
 | chore    | Maintenance                     |
 | perf     | Performance                     |
 
-The description must contain Chinese characters. `scripts/check-commit-msg.py` enforces both the format and the type list; subjects starting with `Merge `, `Revert `, `fixup! `, `squash! ` or `amend! ` are passed through untouched.
+The description must contain Chinese characters. `scripts/check-commit-msg.mjs` enforces both the format and the type list; subjects starting with `Merge `, `Revert `, `fixup! `, `squash! ` or `amend! ` are passed through untouched.
 
-This repository uses husky instead of a plain `pre-commit install`: `npm install` runs the `prepare` script, which installs the hooks, and `.husky/commit-msg` forwards to `pre-commit run --hook-stage commit-msg --commit-msg-filename "$1"`. `pre-commit` itself has to be on `PATH`:
-
-```bash
-python -m pip install --user pre-commit   # skip if pre-commit is already installed
-```
+The hooks are managed by husky: `npm install` runs the `prepare` script, which installs them into `.husky/`, so a clone is ready as soon as the dependencies are installed. `.husky/commit-msg` runs `node scripts/check-commit-msg.mjs "$1"` to validate the subject of every commit.
 
 ## Before you push
 
